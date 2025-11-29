@@ -1,10 +1,19 @@
 """Task routes."""
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Body
 from typing import Optional, List, Dict, Any
+from pydantic import BaseModel
 from app.db.connection import get_pool
 from app.lib.priority import compute_priority
 import json
 import uuid
+
+
+class CreateTaskRequest(BaseModel):
+    """Request model for creating a task."""
+    contact_id: Optional[str] = None
+    title: str
+    due_at: Optional[str] = None
+    status: str = "pending"
 
 router = APIRouter()
 
@@ -53,18 +62,20 @@ async def list_tasks(status: Optional[str] = Query(None)):
                 contact_tags = []
 
             priority = compute_priority(
-                task={
-                    "due_at": task.get("due_at"),
-                    "title": task.get("title"),
-                    "status": task.get("status"),
-                },
-                message={
-                    "body": task.get("latest_message_body") or "",
-                },
-                contact={
-                    "tags": contact_tags,
-                    "last_order_amount": 0,
-                },
+                {
+                    "task": {
+                        "due_at": task.get("due_at"),
+                        "title": task.get("title"),
+                        "status": task.get("status"),
+                    },
+                    "message": {
+                        "body": task.get("latest_message_body") or "",
+                    },
+                    "contact": {
+                        "tags": contact_tags,
+                        "last_order_amount": 0,
+                    },
+                }
             )
 
             task["priority"] = priority
@@ -77,14 +88,9 @@ async def list_tasks(status: Optional[str] = Query(None)):
 
 
 @router.post("")
-async def create_task(
-    contact_id: Optional[str] = None,
-    title: str = None,
-    due_at: Optional[str] = None,
-    status: str = "pending",
-):
+async def create_task(request: CreateTaskRequest):
     """Create a new task."""
-    if not title:
+    if not request.title:
         raise HTTPException(status_code=400, detail="Title is required")
 
     try:
@@ -96,10 +102,10 @@ async def create_task(
                 VALUES ($1, $2, $3, $4)
                 RETURNING *
                 """,
-                contact_id,
-                title,
-                due_at,
-                status,
+                request.contact_id,
+                request.title,
+                request.due_at,
+                request.status,
             )
 
             # Log event
@@ -110,8 +116,8 @@ async def create_task(
                 "task_created",
                 json.dumps({
                     "taskId": str(row["id"]),
-                    "contactId": contact_id,
-                    "title": title,
+                    "contactId": request.contact_id,
+                    "title": request.title,
                 }),
             )
 

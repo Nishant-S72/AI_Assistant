@@ -1,12 +1,32 @@
 """Calendar routes."""
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Body
 from typing import Optional, List, Dict, Any
+from pydantic import BaseModel
 from datetime import datetime, timedelta
 from app.db.connection import get_pool
 from app.clients.llm import generate_chat_completion, LLMMessage, LLMRequestOptions
 import json
 import os
 import re
+
+
+class CreateEventRequest(BaseModel):
+    """Request model for creating a calendar event."""
+    title: str
+    description: Optional[str] = None
+    start_time: str
+    end_time: str
+    is_recurring: bool = False
+    recurrence_pattern: Optional[str] = None
+    recurrence_end_date: Optional[str] = None
+    recurrence_interval: int = 1
+    location: Optional[str] = None
+    attendees: Optional[List[str]] = None
+
+
+class ParseEventRequest(BaseModel):
+    """Request model for parsing calendar event from text."""
+    text: str
 
 router = APIRouter()
 
@@ -89,12 +109,12 @@ async def get_events(start: str = Query(...), end: str = Query(...)):
 
 
 @router.post("/events")
-async def create_event(event_data: Dict[str, Any]):
+async def create_event(request: CreateEventRequest):
     """Create a new calendar event."""
     try:
-        title = event_data.get("title")
-        start_time = event_data.get("start_time")
-        end_time = event_data.get("end_time")
+        title = request.title
+        start_time = request.start_time
+        end_time = request.end_time
 
         if not title or not start_time or not end_time:
             raise HTTPException(status_code=400, detail="Title, start_time, and end_time are required")
@@ -110,17 +130,17 @@ async def create_event(event_data: Dict[str, Any]):
                 RETURNING *
                 """,
                 title,
-                event_data.get("description"),
+                request.description,
                 datetime.fromisoformat(start_time.replace("Z", "+00:00")),
                 datetime.fromisoformat(end_time.replace("Z", "+00:00")),
-                event_data.get("is_recurring", False),
-                event_data.get("recurrence_pattern"),
-                datetime.fromisoformat(event_data["recurrence_end_date"].replace("Z", "+00:00"))
-                if event_data.get("recurrence_end_date")
+                request.is_recurring,
+                request.recurrence_pattern,
+                datetime.fromisoformat(request.recurrence_end_date.replace("Z", "+00:00"))
+                if request.recurrence_end_date
                 else None,
-                event_data.get("recurrence_interval", 1),
-                event_data.get("location"),
-                json.dumps(event_data.get("attendees", [])),
+                request.recurrence_interval,
+                request.location,
+                json.dumps(request.attendees or []),
             )
 
             return {"event": dict(row)}
@@ -132,9 +152,10 @@ async def create_event(event_data: Dict[str, Any]):
 
 
 @router.post("/parse")
-async def parse_event(text: str):
+async def parse_event(request: ParseEventRequest):
     """Parse natural language to create calendar event."""
     try:
+        text = request.text
         if not text:
             raise HTTPException(status_code=400, detail="Text is required")
 

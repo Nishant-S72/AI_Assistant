@@ -9,7 +9,10 @@ router = APIRouter()
 async def require_auth(authorization: Optional[str] = Header(None), token: Optional[str] = Query(None)):
     """Auth middleware."""
     import os
-    auth_token = authorization.replace("Bearer ", "") if authorization else token
+    if authorization:
+        auth_token = authorization.replace("Bearer ", "") if authorization.startswith("Bearer ") else authorization
+    else:
+        auth_token = token
     expected_token = os.getenv("DEMO_SEED_TOKEN") or os.getenv("ADMIN_API_KEY")
 
     if not expected_token or auth_token != expected_token:

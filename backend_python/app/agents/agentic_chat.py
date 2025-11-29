@@ -37,8 +37,19 @@ async def start_cleanup_task():
         await cleanup_inactive_sessions()
 
 
-# Start cleanup task in background
-asyncio.create_task(start_cleanup_task())
+# Cleanup task will be started in application lifespan
+_cleanup_task = None
+
+
+def get_cleanup_task():
+    """Get the cleanup task instance."""
+    return _cleanup_task
+
+
+def set_cleanup_task(task):
+    """Set the cleanup task instance."""
+    global _cleanup_task
+    _cleanup_task = task
 
 
 async def create_calendar_event(text: str) -> Dict[str, Any]:

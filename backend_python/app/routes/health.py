@@ -1,5 +1,6 @@
 """Health check routes."""
 from fastapi import APIRouter, HTTPException
+from fastapi.responses import JSONResponse
 from app.db.connection import get_pool
 from app.clients.llm import check_ollama_health
 import os
@@ -39,5 +40,5 @@ async def health():
         health_status["llm"] = "unknown"
 
     status_code = 200 if health_status["status"] == "ok" else 503
-    return health_status
+    return JSONResponse(content=health_status, status_code=status_code)
 

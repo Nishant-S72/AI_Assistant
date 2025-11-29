@@ -25,8 +25,22 @@ async def lifespan(app: FastAPI):
     """Lifespan context manager for startup/shutdown."""
     # Startup
     await init_database()
+    
+    # Start background cleanup task for agentic chat
+    from app.agents import agentic_chat
+    import asyncio
+    agentic_chat.set_cleanup_task(asyncio.create_task(agentic_chat.start_cleanup_task()))
+    
     yield
+    
     # Shutdown
+    cleanup_task = agentic_chat.get_cleanup_task()
+    if cleanup_task:
+        cleanup_task.cancel()
+        try:
+            await cleanup_task
+        except asyncio.CancelledError:
+            pass
     await close_pool()
 
 
