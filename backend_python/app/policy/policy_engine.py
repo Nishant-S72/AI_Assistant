@@ -36,6 +36,36 @@ DEFAULT_RULES = [
         "reason": "Contains sensitive personal information",
         "confidence": 1.0,
     },
+    {
+        "keywords": ["termination", "fired", "dismissal", "layoff"],
+        "action": "ESCALATE",
+        "reason": "Contains HR/termination keywords",
+        "confidence": 0.95,
+    },
+    {
+        "keywords": ["passport", "visa", "immigration", "citizenship"],
+        "action": "ESCALATE",
+        "reason": "Contains immigration/legal document keywords",
+        "confidence": 0.9,
+    },
+    {
+        "keywords": ["criminal", "felony", "arrest", "conviction"],
+        "action": "ESCALATE",
+        "reason": "Contains criminal/legal keywords",
+        "confidence": 0.95,
+    },
+    {
+        "keywords": ["medical", "diagnosis", "health condition", "disability"],
+        "action": "ESCALATE",
+        "reason": "Contains medical/health information",
+        "confidence": 0.9,
+    },
+    {
+        "keywords": ["contract drafting", "legal opinion", "legal advice"],
+        "action": "ESCALATE",
+        "reason": "Request for legal services",
+        "confidence": 0.95,
+    },
 ]
 
 _rules: List[Dict[str, Any]] = []

@@ -12,16 +12,13 @@ import re
 
 class CreateEventRequest(BaseModel):
     """Request model for creating a calendar event."""
+    suggestionId: Optional[str] = None
     title: str
     description: Optional[str] = None
-    start_time: str
-    end_time: str
-    is_recurring: bool = False
-    recurrence_pattern: Optional[str] = None
-    recurrence_end_date: Optional[str] = None
-    recurrence_interval: int = 1
-    location: Optional[str] = None
+    start: str  # ISO string
+    end: str  # ISO string
     attendees: Optional[List[str]] = None
+    timezone: Optional[str] = None
 
 
 class ParseEventRequest(BaseModel):
@@ -110,45 +107,128 @@ async def get_events(start: str = Query(...), end: str = Query(...)):
 
 @router.post("/events")
 async def create_event(request: CreateEventRequest):
-    """Create a new calendar event."""
+    """Create a new calendar event (Google Calendar or simulated)."""
     try:
-        title = request.title
-        start_time = request.start_time
-        end_time = request.end_time
-
-        if not title or not start_time or not end_time:
-            raise HTTPException(status_code=400, detail="Title, start_time, and end_time are required")
-
+        if not request.title or not request.start or not request.end:
+            raise HTTPException(status_code=400, detail="Title, start, and end are required")
+        
+        # Validate times
+        try:
+            start_dt = datetime.fromisoformat(request.start.replace("Z", "+00:00"))
+            end_dt = datetime.fromisoformat(request.end.replace("Z", "+00:00"))
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Invalid date format: {str(e)}")
+        
+        if end_dt <= start_dt:
+            raise HTTPException(status_code=400, detail="End time must be after start time")
+        
+        event_source = "simulated"
+        google_event_id = None
+        
+        # Try Google Calendar if configured
+        google_oauth_token = os.getenv("GOOGLE_OAUTH_TOKEN")
+        if google_oauth_token:
+            try:
+                import httpx
+                async with httpx.AsyncClient(timeout=10.0) as client:
+                    # Create Google Calendar event
+                    google_response = await client.post(
+                        "https://www.googleapis.com/calendar/v3/calendars/primary/events",
+                        headers={
+                            "Authorization": f"Bearer {google_oauth_token}",
+                            "Content-Type": "application/json",
+                        },
+                        json={
+                            "summary": request.title,
+                            "description": request.description or "",
+                            "start": {
+                                "dateTime": request.start,
+                                "timeZone": request.timezone or "UTC",
+                            },
+                            "end": {
+                                "dateTime": request.end,
+                                "timeZone": request.timezone or "UTC",
+                            },
+                            "attendees": [{"email": email} for email in (request.attendees or [])],
+                        },
+                    )
+                    
+                    if google_response.status_code == 200:
+                        google_data = google_response.json()
+                        google_event_id = google_data.get("id")
+                        event_source = "google"
+            except Exception as e:
+                print(f"[Calendar] Google Calendar creation failed: {e}")
+                # Fallback to simulated
+        
+        # Save to database
         pool = await get_pool()
         async with pool.acquire() as conn:
             row = await conn.fetchrow(
                 """
                 INSERT INTO calendar_events 
-                (title, description, start_time, end_time, is_recurring, recurrence_pattern, 
-                 recurrence_end_date, recurrence_interval, location, attendees)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                (title, description, start_time, end_time, location, attendees)
+                VALUES ($1, $2, $3, $4, $5, $6)
                 RETURNING *
                 """,
-                title,
+                request.title,
                 request.description,
-                datetime.fromisoformat(start_time.replace("Z", "+00:00")),
-                datetime.fromisoformat(end_time.replace("Z", "+00:00")),
-                request.is_recurring,
-                request.recurrence_pattern,
-                datetime.fromisoformat(request.recurrence_end_date.replace("Z", "+00:00"))
-                if request.recurrence_end_date
-                else None,
-                request.recurrence_interval,
-                request.location,
+                start_dt,
+                end_dt,
+                None,  # location
                 json.dumps(request.attendees or []),
             )
+            
+            # Save simulated event to JSON if not using DB
+            if event_source == "simulated":
+                storage_path = Path(__file__).parent.parent.parent.parent / "backend" / "storage" / "simulated_events.json"
+                if not storage_path.exists():
+                    storage_path = Path.cwd() / "backend_python" / "storage" / "simulated_events.json"
+                    storage_path.parent.mkdir(parents=True, exist_ok=True)
+                
+                simulated_events = []
+                if storage_path.exists():
+                    try:
+                        with open(storage_path, "r", encoding="utf-8") as f:
+                            simulated_events = json.load(f)
+                    except:
+                        pass
+                
+                simulated_events.append({
+                    "id": str(row["id"]),
+                    "title": request.title,
+                    "start": request.start,
+                    "end": request.end,
+                    "attendees": request.attendees or [],
+                    "created_at": datetime.now().isoformat(),
+                })
+                
+                with open(storage_path, "w", encoding="utf-8") as f:
+                    json.dump(simulated_events, f, indent=2)
+            
+            # Log audit event
+            await conn.execute(
+                """
+                INSERT INTO events (type, payload)
+                VALUES ($1, $2)
+                """,
+                "calendar_event_created",
+                json.dumps({
+                    "suggestionId": request.suggestionId,
+                    "eventId": str(row["id"]),
+                    "googleEventId": google_event_id,
+                    "source": event_source,
+                    "title": request.title,
+                }),
+            )
+        
+        return {
+            "success": True,
+            "eventId": str(row["id"]),
+            "source": event_source,
+            "googleEventId": google_event_id,
+        }
 
-            return {"event": dict(row)}
-    except HTTPException:
-        raise
-    except Exception as error:
-        print(f"Error creating calendar event: {error}")
-        raise HTTPException(status_code=500, detail=f"Failed to create calendar event: {str(error)}")
 
 
 @router.post("/parse")

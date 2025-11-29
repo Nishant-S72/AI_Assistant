@@ -15,6 +15,7 @@ from app.routes import (
     tasks,
     health,
     admin,
+    policydoc,
 )
 
 load_dotenv()
@@ -69,6 +70,7 @@ app.include_router(chat.router, prefix="/api/chat", tags=["chat"])
 app.include_router(tasks.router, prefix="/api/tasks", tags=["tasks"])
 app.include_router(health.router, prefix="/api/health", tags=["health"])
 app.include_router(admin.router, prefix="/api/admin", tags=["admin"])
+app.include_router(policydoc.router, prefix="/api/policydoc", tags=["policydoc"])
 
 
 @app.get("/")

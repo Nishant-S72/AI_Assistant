@@ -1,19 +1,23 @@
 /**
- * Floating Chatbox Component
- * AI assistant that can answer questions about inbox, policies, and tasks
+ * Floating Chatbox Component with RAG
+ * AI assistant with policy document retrieval and citations
  */
 
 'use client';
 
 import { useState, useRef, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { api } from '@/lib/api';
+import { ragChat, RAGChatResponse, Citation } from '@/lib/api';
 import AiThinkingDots from './AiThinkingDots';
 
 interface Message {
   role: 'user' | 'assistant';
   content: string;
   timestamp: Date;
+  citations?: Citation[];
+  suggestionId?: string | null;
+  escalated?: boolean;
+  escalationReasons?: string[];
 }
 
 export default function FloatingChatbox() {
@@ -27,11 +31,15 @@ export default function FloatingChatbox() {
   ]);
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
+  const [tone, setTone] = useState<'formal' | 'warm' | 'crisp'>('warm');
+  const [ragEnabled, setRagEnabled] = useState(true);
+  const [showSources, setShowSources] = useState<number | null>(null);
+  const [escalated, setEscalated] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
-  const inputRef = useRef<HTMLInputElement>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
   const lastActivityRef = useRef<Date>(new Date());
   const inactivityTimerRef = useRef<NodeJS.Timeout | null>(null);
-  const sessionIdRef = useRef<string | null>(null);
+  const threadIdRef = useRef<string | null>(null);
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -39,7 +47,7 @@ export default function FloatingChatbox() {
 
   useEffect(() => {
     scrollToBottom();
-  }, [messages]);
+  }, [messages, showSources]);
 
   useEffect(() => {
     if (isOpen && inputRef.current) {
@@ -47,26 +55,23 @@ export default function FloatingChatbox() {
     }
   }, [isOpen]);
 
-  // Initialize session ID on mount
+  // Initialize thread ID on mount
   useEffect(() => {
-    if (!sessionIdRef.current) {
-      sessionIdRef.current = `chat_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    if (!threadIdRef.current) {
+      threadIdRef.current = `thread_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
     }
   }, []);
 
-  // Initialize inactivity timer on mount
+  // Initialize inactivity timer
   useEffect(() => {
     const resetInactivityTimer = () => {
       lastActivityRef.current = new Date();
       
-      // Clear existing timer
       if (inactivityTimerRef.current) {
         clearTimeout(inactivityTimerRef.current);
       }
       
-      // Set new timer for 1 hour (3600000 ms)
       inactivityTimerRef.current = setTimeout(() => {
-        // Reset conversation after 1 hour of inactivity
         setMessages([
           {
             role: 'assistant',
@@ -74,25 +79,23 @@ export default function FloatingChatbox() {
             timestamp: new Date(),
           },
         ]);
-        // Generate new session ID
-        sessionIdRef.current = `chat_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+        threadIdRef.current = `thread_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+        setEscalated(false);
         console.log('[Chat] Context cleared after 1 hour of inactivity');
-      }, 3600000); // 1 hour
+      }, 3600000);
     };
 
-    // Initialize timer
     resetInactivityTimer();
 
-    // Cleanup on unmount
     return () => {
       if (inactivityTimerRef.current) {
         clearTimeout(inactivityTimerRef.current);
       }
     };
-  }, []); // Only run on mount
+  }, []);
 
   const sendMessage = async () => {
-    if (!input.trim() || isLoading) return;
+    if (!input.trim() || isLoading || escalated) return;
 
     const userMessage: Message = {
       role: 'user',
@@ -104,7 +107,7 @@ export default function FloatingChatbox() {
     setInput('');
     setIsLoading(true);
     
-    // Reset inactivity timer on user activity
+    // Reset inactivity timer
     lastActivityRef.current = new Date();
     if (inactivityTimerRef.current) {
       clearTimeout(inactivityTimerRef.current);
@@ -117,62 +120,45 @@ export default function FloatingChatbox() {
           timestamp: new Date(),
         },
       ]);
-      sessionIdRef.current = `chat_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+      threadIdRef.current = `thread_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+      setEscalated(false);
       console.log('[Chat] Context cleared after 1 hour of inactivity');
     }, 3600000);
 
     try {
-      // Prepare conversation history (last 10 messages for context)
-      const conversationHistory = messages
-        .slice(-10) // Last 10 messages for context
-        .map((msg) => ({
-          role: msg.role,
-          content: msg.content,
-        }));
-
-      // Use Next.js API rewrite (routes to backend on port 3001)
-      const response = await fetch('/api/chat', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          question: userMessage.content,
-          conversationHistory,
-          sessionId: sessionIdRef.current,
-        }),
+      const response = await ragChat.sendMessage({
+        threadId: threadIdRef.current || undefined,
+        userMessage: userMessage.content,
+        tone,
+        rag: ragEnabled,
       });
 
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({ error: `HTTP ${response.status}` }));
-        throw new Error(errorData.error || errorData.details || 'Failed to get response');
-      }
-
-      const data = await response.json();
-      
-      if (!data.answer) {
-        throw new Error('No answer received from server');
-      }
-
-      // Update session ID if provided by backend
-      if (data.sessionId && data.sessionId !== sessionIdRef.current) {
-        sessionIdRef.current = data.sessionId;
+      // Check for escalation
+      if (response.escalated) {
+        setEscalated(true);
       }
 
       const assistantMessage: Message = {
         role: 'assistant',
-        content: data.answer,
+        content: response.reply,
         timestamp: new Date(),
+        citations: response.citations,
+        suggestionId: response.suggestionId,
+        escalated: response.escalated,
+        escalationReasons: response.reasons,
       };
 
       setMessages((prev) => [...prev, assistantMessage]);
 
-      // If a calendar event was created, show a success notification and refresh calendar if on calendar page
-      if (data.calendarEvent) {
-        const event = data.calendarEvent;
-        // Trigger a custom event that the calendar page can listen to
-        if (typeof window !== 'undefined') {
-          window.dispatchEvent(new CustomEvent('calendarEventCreated', { detail: event }));
+      // Send feedback automatically (accepted)
+      if (response.suggestionId) {
+        try {
+          await ragChat.sendFeedback({
+            suggestionId: response.suggestionId,
+            accepted: true,
+          });
+        } catch (e) {
+          console.warn('Failed to send feedback:', e);
         }
       }
     } catch (error: any) {
@@ -188,7 +174,7 @@ export default function FloatingChatbox() {
     }
   };
 
-  const handleKeyPress = (e: React.KeyboardEvent) => {
+  const handleKeyPress = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       sendMessage();
@@ -226,24 +212,53 @@ export default function FloatingChatbox() {
           >
             {/* Header */}
             <div className="p-4 border-b border-[var(--glass-border)] bg-white/80 backdrop-blur-sm">
-              <div className="flex items-center gap-3">
-                <div className="w-10 h-10 rounded-full bg-[var(--primary)] flex items-center justify-center text-white font-semibold">
-                  S
-                </div>
-                <div>
-                  <h3 className="font-semibold text-theme-primary">Soraya AI</h3>
-                  <p className="text-xs text-theme-muted">Ask me anything</p>
+              <div className="flex items-center justify-between mb-3">
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-full bg-[var(--primary)] flex items-center justify-center text-white font-semibold">
+                    S
+                  </div>
+                  <div>
+                    <h3 className="font-semibold text-theme-primary">Soraya AI</h3>
+                    <p className="text-xs text-theme-muted">Ask me anything</p>
+                  </div>
                 </div>
               </div>
+              
+              {/* Controls */}
+              <div className="flex items-center gap-3 text-xs">
+                <label className="flex items-center gap-1.5 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={ragEnabled}
+                    onChange={(e) => setRagEnabled(e.target.checked)}
+                    className="w-3 h-3"
+                  />
+                  <span className="text-theme-muted">RAG: Policy</span>
+                </label>
+                <select
+                  value={tone}
+                  onChange={(e) => setTone(e.target.value as 'formal' | 'warm' | 'crisp')}
+                  className="text-xs px-2 py-1 bg-white/80 border border-[var(--glass-border)] rounded"
+                >
+                  <option value="formal">Formal</option>
+                  <option value="warm">Warm</option>
+                  <option value="crisp">Crisp</option>
+                </select>
+              </div>
             </div>
+
+            {/* Escalation Banner */}
+            {escalated && (
+              <div className="px-4 py-2 bg-red-100 border-b border-red-300 text-red-800 text-sm">
+                <p className="font-semibold">⚠️ Requires Human Review</p>
+                <p className="text-xs mt-1">This request has been escalated. Agentic actions are disabled.</p>
+              </div>
+            )}
 
             {/* Messages */}
             <div className="flex-1 overflow-y-auto custom-scrollbar p-4 space-y-4">
               {messages.map((msg, idx) => (
-                <div
-                  key={idx}
-                  className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
-                >
+                <div key={idx} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
                   <div
                     className={`max-w-[80%] rounded-2xl p-3 ${
                       msg.role === 'user'
@@ -251,7 +266,29 @@ export default function FloatingChatbox() {
                         : 'bg-white/60 dark:bg-[var(--card-bg)] border border-[var(--glass-border)] text-theme-primary'
                     }`}
                   >
-                    <p className="text-sm leading-relaxed">{msg.content}</p>
+                    <p className="text-sm leading-relaxed whitespace-pre-wrap">{msg.content}</p>
+                    
+                    {/* Citations */}
+                    {msg.citations && msg.citations.length > 0 && (
+                      <div className="mt-2 pt-2 border-t border-gray-300/30">
+                        <button
+                          onClick={() => setShowSources(showSources === idx ? null : idx)}
+                          className="text-xs text-blue-600 hover:underline"
+                        >
+                          {showSources === idx ? 'Hide' : 'Show'} sources ({msg.citations.length})
+                        </button>
+                        {showSources === idx && (
+                          <div className="mt-2 space-y-1 text-xs">
+                            {msg.citations.map((citation, cIdx) => (
+                              <div key={cIdx} className="text-gray-600">
+                                <span className="font-semibold">§{cIdx + 1}</span> (Score: {citation.score.toFixed(2)})
+                                <p className="text-gray-500 mt-0.5">{citation.textSnippet}</p>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    )}
                   </div>
                 </div>
               ))}
@@ -268,19 +305,19 @@ export default function FloatingChatbox() {
             {/* Input */}
             <div className="p-4 border-t border-[var(--glass-border)] bg-white/80 backdrop-blur-sm">
               <div className="flex gap-2">
-                <input
+                <textarea
                   ref={inputRef}
-                  type="text"
                   value={input}
                   onChange={(e) => setInput(e.target.value)}
                   onKeyPress={handleKeyPress}
-                  placeholder="Ask about inbox, tasks, policies..."
-                  className="flex-1 px-4 py-2 bg-white/80 border border-[var(--glass-border)] rounded-xl focus:outline-none focus:ring-2 focus:ring-[var(--primary)] text-sm"
-                  disabled={isLoading}
+                  placeholder="Ask about inbox, tasks, policies... (Shift+Enter for newline)"
+                  className="flex-1 px-4 py-2 bg-white/80 border border-[var(--glass-border)] rounded-xl focus:outline-none focus:ring-2 focus:ring-[var(--primary)] text-sm resize-none min-h-[40px] max-h-[100px]"
+                  disabled={isLoading || escalated}
+                  rows={1}
                 />
                 <button
                   onClick={sendMessage}
-                  disabled={isLoading || !input.trim()}
+                  disabled={isLoading || !input.trim() || escalated}
                   className="px-4 py-2 bg-[var(--primary)] text-white rounded-xl hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed transition-opacity"
                   aria-label="Send message"
                 >
@@ -294,4 +331,3 @@ export default function FloatingChatbox() {
     </>
   );
 }
-

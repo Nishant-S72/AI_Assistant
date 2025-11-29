@@ -349,3 +349,61 @@ export interface SummaryResponse {
 export async function getSummary(): Promise<SummaryResponse> {
   return fetchApi<SummaryResponse>('/api/summary');
 }
+
+// RAG Chat API
+export interface RAGChatRequest {
+  threadId?: string;
+  userMessage: string;
+  tone?: 'formal' | 'warm' | 'crisp';
+  rag?: boolean;
+}
+
+export interface Citation {
+  id: string;
+  score: number;
+  textSnippet: string;
+}
+
+export interface RAGChatResponse {
+  reply: string;
+  citations: Citation[];
+  suggestionId: string | null;
+  escalated?: boolean;
+  reasons?: string[];
+}
+
+export interface ChatFeedbackRequest {
+  suggestionId: string;
+  accepted: boolean;
+  editedText?: string;
+}
+
+export const ragChat = {
+  sendMessage: async (request: RAGChatRequest): Promise<RAGChatResponse> => {
+    return fetchApi<RAGChatResponse>('/api/chat/rag', {
+      method: 'POST',
+      body: JSON.stringify(request),
+    });
+  },
+
+  sendFeedback: async (request: ChatFeedbackRequest): Promise<{ success: boolean }> => {
+    return fetchApi<{ success: boolean }>('/api/chat/feedback', {
+      method: 'POST',
+      body: JSON.stringify(request),
+    });
+  },
+};
+
+// Policy Document API
+export interface PolicyChunk {
+  id: string;
+  title: string;
+  summary: string;
+  score: number;
+}
+
+export const policyDoc = {
+  getChunks: async (): Promise<{ chunks: PolicyChunk[] }> => {
+    return fetchApi<{ chunks: PolicyChunk[] }>('/api/policydoc/chunks');
+  },
+};
