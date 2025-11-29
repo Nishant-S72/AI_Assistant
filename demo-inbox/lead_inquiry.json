@@ -1,0 +1,30 @@
+{
+  "id": "thread-lead-001",
+  "contact": {
+    "name": "Sarah Martinez",
+    "email": "sarah.martinez@greenretail.com",
+    "company": "Green Retail Co.",
+    "phone": "+1-555-0101"
+  },
+  "subject": "Bulk Order Inquiry - 200 Vegan Leather Bags",
+  "messages": [
+    {
+      "sender": "customer",
+      "text": "Hello, I'm reaching out on behalf of Green Retail Co. We're interested in placing a bulk order for 200 vegan leather bags for our upcoming spring collection. Could you please provide pricing information, available colors, and estimated delivery time? We're looking to launch by March 15th.",
+      "timestamp": "2025-01-10T10:00:00Z"
+    },
+    {
+      "sender": "assistant",
+      "text": "Thank you for your interest in our vegan leather bags! I'd be happy to help you with pricing and availability for your bulk order.",
+      "timestamp": "2025-01-10T10:02:00Z"
+    },
+    {
+      "sender": "customer",
+      "text": "Great! Also, do you offer any customization options? We'd like to add our logo to the bags. What's the minimum order quantity for custom branding?",
+      "timestamp": "2025-01-10T14:30:00Z"
+    }
+  ],
+  "tags": ["lead", "bulk-order", "customization"],
+  "priority": "high"
+}
+

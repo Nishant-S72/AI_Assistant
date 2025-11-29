@@ -1,0 +1,30 @@
+{
+  "id": "thread-complaint-001",
+  "contact": {
+    "name": "Michael Chen",
+    "email": "mchen@techstartup.io",
+    "company": "TechStartup Inc.",
+    "phone": "+1-555-0202"
+  },
+  "subject": "Order #ST-4567 - Delayed Shipment Inquiry",
+  "messages": [
+    {
+      "sender": "customer",
+      "text": "Hi, I placed an order (#ST-4567) on January 5th with an estimated delivery date of January 12th. It's now January 15th and I haven't received any shipping updates. The tracking link shows 'label created' but no movement. Can you please check the status and provide an updated ETA? This is for an important client presentation next week.",
+      "timestamp": "2025-01-15T09:15:00Z"
+    },
+    {
+      "sender": "assistant",
+      "text": "I apologize for the delay. Let me check the status of your order right away and get back to you with an update.",
+      "timestamp": "2025-01-15T09:20:00Z"
+    },
+    {
+      "sender": "customer",
+      "text": "I still haven't heard back. This is urgent - I need the order by Wednesday at the latest. If it can't arrive by then, I'll need to cancel and find an alternative supplier. Please escalate this immediately.",
+      "timestamp": "2025-01-16T11:45:00Z"
+    }
+  ],
+  "tags": ["complaint", "shipping", "urgent"],
+  "priority": "urgent"
+}
+

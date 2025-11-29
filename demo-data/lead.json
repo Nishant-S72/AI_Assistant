@@ -1,0 +1,28 @@
+{
+  "contact": {
+    "name": "Sarah Chen",
+    "email": "sarah.chen@techcorp.com",
+    "phone": "+1-555-0123",
+    "company": "TechCorp Inc.",
+    "tags": ["lead", "enterprise", "sales"],
+    "tone_pref": "professional"
+  },
+  "thread": [
+    {
+      "sender": "contact",
+      "body": "Hi, I'm interested in learning more about your enterprise plans. We're a team of 50+ and looking for a solution that can scale with us. Can you provide pricing information?",
+      "created_at": "2024-01-15T10:00:00Z"
+    },
+    {
+      "sender": "assistant",
+      "body": "Thank you for reaching out! I'd be happy to help you with enterprise pricing. Let me connect you with our sales team.",
+      "created_at": "2024-01-15T14:30:00Z"
+    },
+    {
+      "sender": "contact",
+      "body": "Great! Also, do you offer any trial periods? We'd like to test the solution with a small team first before committing.",
+      "created_at": "2024-01-16T09:15:00Z"
+    }
+  ]
+}
+

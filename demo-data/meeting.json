@@ -1,0 +1,28 @@
+{
+  "contact": {
+    "name": "Dr. Emily Watson",
+    "email": "emily.watson@university.edu",
+    "phone": "+1-555-0789",
+    "company": "State University",
+    "tags": ["meeting", "partnership"],
+    "tone_pref": "formal"
+  },
+  "thread": [
+    {
+      "sender": "contact",
+      "body": "Hello, I'm reaching out on behalf of State University. We're interested in exploring a partnership opportunity for our research department. Would it be possible to schedule a call next week?",
+      "created_at": "2024-01-18T11:00:00Z"
+    },
+    {
+      "sender": "assistant",
+      "body": "Thank you for your interest! I'd be happy to schedule a call. What times work best for you?",
+      "created_at": "2024-01-18T14:00:00Z"
+    },
+    {
+      "sender": "contact",
+      "body": "How about Tuesday or Wednesday afternoon? I'm available between 2-4 PM EST. Looking forward to discussing how we can collaborate.",
+      "created_at": "2024-01-19T09:30:00Z"
+    }
+  ]
+}
+

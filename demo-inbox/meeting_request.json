@@ -1,0 +1,30 @@
+{
+  "id": "thread-meeting-001",
+  "contact": {
+    "name": "Dr. Emily Rodriguez",
+    "email": "emily.rodriguez@university.edu",
+    "company": "State University Research Lab",
+    "phone": "+1-555-0303"
+  },
+  "subject": "Partnership Discussion - Research Collaboration Proposal",
+  "messages": [
+    {
+      "sender": "customer",
+      "text": "Hello, I'm Dr. Emily Rodriguez from the State University Research Lab. We're working on a sustainability project and would like to explore a potential partnership with your company. We're particularly interested in your eco-friendly manufacturing processes. Would it be possible to schedule a call next week to discuss collaboration opportunities? I'm available Tuesday through Thursday, 2-4 PM EST.",
+      "timestamp": "2025-01-18T11:00:00Z"
+    },
+    {
+      "sender": "assistant",
+      "text": "Thank you for reaching out! I'd be happy to schedule a call to discuss potential collaboration. Let me check availability and get back to you.",
+      "timestamp": "2025-01-18T14:00:00Z"
+    },
+    {
+      "sender": "customer",
+      "text": "Perfect! Also, I'd like to share a brief proposal document before the call. Should I send it via email, or is there a preferred method for sharing documents? Looking forward to our conversation.",
+      "timestamp": "2025-01-19T09:30:00Z"
+    }
+  ],
+  "tags": ["meeting", "partnership", "research"],
+  "priority": "medium"
+}
+
