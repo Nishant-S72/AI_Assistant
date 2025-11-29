@@ -1,7 +1,7 @@
 """OpenAI LLM adapter."""
 import os
 from typing import Literal, Optional
-from openai import OpenAI
+from openai import AsyncOpenAI
 
 
 class LLMMessage:
@@ -44,14 +44,14 @@ class LLMResponse:
 
 
 async def generate_with_openai(options: LLMOptions) -> LLMResponse:
-    """Generate completion using OpenAI."""
+    """Generate completion using OpenAI (async)."""
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
         raise ValueError("OPENAI_API_KEY not configured")
 
-    client = OpenAI(api_key=api_key)
+    client = AsyncOpenAI(api_key=api_key)
 
-    response = client.chat.completions.create(
+    response = await client.chat.completions.create(
         model=options.model,
         messages=[msg.to_dict() for msg in options.messages],
         max_tokens=options.max_tokens,

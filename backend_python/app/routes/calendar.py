@@ -3,6 +3,7 @@ from fastapi import APIRouter, HTTPException, Query, Body
 from typing import Optional, List, Dict, Any
 from pydantic import BaseModel
 from datetime import datetime, timedelta
+from pathlib import Path
 from app.db.connection import get_pool
 from app.clients.llm import generate_chat_completion, LLMMessage, LLMRequestOptions
 import json
@@ -55,11 +56,13 @@ def generate_recurring_instances(event: Dict, start_date: datetime, end_date: da
         elif pattern == "weekly":
             current += timedelta(weeks=interval)
         elif pattern == "monthly":
-            # Simple monthly increment
-            if current.month == 12:
-                current = current.replace(year=current.year + 1, month=1)
-            else:
-                current = current.replace(month=current.month + interval)
+            # Proper monthly increment with year adjustment
+            new_month = current.month + interval
+            new_year = current.year
+            while new_month > 12:
+                new_month -= 12
+                new_year += 1
+            current = current.replace(year=new_year, month=new_month)
         elif pattern == "yearly":
             current = current.replace(year=current.year + interval)
         else:
@@ -163,6 +166,76 @@ async def create_event(request: CreateEventRequest):
         
         # Save to database
         pool = await get_pool()
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                INSERT INTO calendar_events 
+                (title, description, start_time, end_time, location, attendees)
+                VALUES ($1, $2, $3, $4, $5, $6)
+                RETURNING *
+                """,
+                request.title,
+                request.description,
+                start_dt,
+                end_dt,
+                None,  # location
+                json.dumps(request.attendees or []),
+            )
+            
+            # Save simulated event to JSON if not using DB
+            if event_source == "simulated":
+                storage_path = Path(__file__).parent.parent.parent.parent / "backend" / "storage" / "simulated_events.json"
+                if not storage_path.exists():
+                    storage_path = Path.cwd() / "backend_python" / "storage" / "simulated_events.json"
+                    storage_path.parent.mkdir(parents=True, exist_ok=True)
+                
+                simulated_events = []
+                if storage_path.exists():
+                    try:
+                        with open(storage_path, "r", encoding="utf-8") as f:
+                            simulated_events = json.load(f)
+                    except:
+                        pass
+                
+                simulated_events.append({
+                    "id": str(row["id"]),
+                    "title": request.title,
+                    "start": request.start,
+                    "end": request.end,
+                    "attendees": request.attendees or [],
+                    "created_at": datetime.now().isoformat(),
+                })
+                
+                with open(storage_path, "w", encoding="utf-8") as f:
+                    json.dump(simulated_events, f, indent=2)
+            
+            # Log audit event
+            await conn.execute(
+                """
+                INSERT INTO events (type, payload)
+                VALUES ($1, $2)
+                """,
+                "calendar_event_created",
+                json.dumps({
+                    "suggestionId": request.suggestionId,
+                    "eventId": str(row["id"]),
+                    "googleEventId": google_event_id,
+                    "source": event_source,
+                    "title": request.title,
+                }),
+            )
+        
+        return {
+            "success": True,
+            "eventId": str(row["id"]),
+            "source": event_source,
+            "googleEventId": google_event_id,
+        }
+    except HTTPException:
+        raise
+    except Exception as error:
+        print(f"Error creating calendar event: {error}")
+        raise HTTPException(status_code=500, detail=f"Failed to create calendar event: {str(error)}")
         async with pool.acquire() as conn:
             row = await conn.fetchrow(
                 """
