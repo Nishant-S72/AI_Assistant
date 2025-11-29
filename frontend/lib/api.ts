@@ -350,12 +350,12 @@ export async function getSummary(): Promise<SummaryResponse> {
   return fetchApi<SummaryResponse>('/api/summary');
 }
 
-// RAG Chat API
-export interface RAGChatRequest {
+// Chat API (Intent-Based)
+export interface ChatRequest {
   threadId?: string;
   userMessage: string;
   tone?: 'formal' | 'warm' | 'crisp';
-  rag?: boolean;
+  correlationId?: string;
 }
 
 export interface Citation {
@@ -364,18 +364,57 @@ export interface Citation {
   textSnippet: string;
 }
 
-export interface RAGChatResponse {
-  reply: string;
-  citations: Citation[];
+export interface ChatResponse {
+  kind: 'assistant' | 'policy' | 'action';
+  text: string;
+  citations?: Citation[];
   suggestionId: string | null;
+  intent: 'policy_intent' | 'action_intent' | 'general_intent';
+  intent_confidence: number;
+  action_suggestion?: {
+    action_type: string;
+    confirm_needed: boolean;
+    extracted_data?: any;
+  };
   escalated?: boolean;
-  reasons?: string[];
 }
 
 export interface ChatFeedbackRequest {
   suggestionId: string;
   accepted: boolean;
   editedText?: string;
+}
+
+export const chat = {
+  sendMessage: async (request: ChatRequest): Promise<ChatResponse> => {
+    return fetchApi<ChatResponse>('/api/chat', {
+      method: 'POST',
+      body: JSON.stringify(request),
+    });
+  },
+
+  sendFeedback: async (request: ChatFeedbackRequest): Promise<{ success: boolean }> => {
+    return fetchApi<{ success: boolean }>('/api/chat/feedback', {
+      method: 'POST',
+      body: JSON.stringify(request),
+    });
+  },
+};
+
+// RAG Chat API (Deprecated - kept for backwards compatibility)
+export interface RAGChatRequest {
+  threadId?: string;
+  userMessage: string;
+  tone?: 'formal' | 'warm' | 'crisp';
+  rag?: boolean;
+}
+
+export interface RAGChatResponse {
+  reply: string;
+  citations: Citation[];
+  suggestionId: string | null;
+  escalated?: boolean;
+  reasons?: string[];
 }
 
 export const ragChat = {

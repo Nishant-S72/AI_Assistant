@@ -1,410 +1,509 @@
 /**
- * Chat API Route
- * Handles questions about inbox, policies, tasks, etc.
+ * Chat API Route with Intent-Based Routing
+ * Routes to: general_intent (conversational), policy_intent (RAG), or action_intent (agentic)
  */
 
 import { Router, Request, Response } from 'express';
 import { pool } from '../db';
 import { generateChatCompletion, LLMMessage } from '../clients/llm';
 import { checkPolicy } from '../policy/policyEngine';
-import { runAgenticChat } from '../agents/agenticChat';
+import { classifyIntent, IntentType } from '../policy/intentClassifier';
+import { query } from '../clients/vectorstore';
 import * as fs from 'fs';
 import * as path from 'path';
+import { gzip } from 'zlib';
+import { promisify } from 'util';
+import { v4 as uuidv4 } from 'uuid';
 
+const gzipAsync = promisify(gzip);
 const router = Router();
 
-// In-memory session storage for conversation context
-// Key: sessionId, Value: { messages: LLMMessage[], lastActivity: Date }
-interface SessionContext {
-  messages: LLMMessage[];
-  lastActivity: Date;
+interface ChatRequest {
+  threadId?: string;
+  userMessage: string;
+  tone?: 'formal' | 'warm' | 'crisp';
+  correlationId?: string;
 }
 
-const sessionContexts = new Map<string, SessionContext>();
+interface ChatResponse {
+  kind: 'assistant' | 'policy' | 'action';
+  text: string;
+  citations?: Array<{ id: string; score: number; textSnippet: string }>;
+  suggestionId: string | null;
+  intent: IntentType;
+  intent_confidence: number;
+  action_suggestion?: {
+    action_type: string;
+    confirm_needed: boolean;
+    extracted_data?: any;
+  };
+  escalated?: boolean;
+}
 
-// Clean up inactive sessions (older than 1 hour)
-setInterval(() => {
-  const now = Date.now();
-  const oneHour = 60 * 60 * 1000; // 1 hour in milliseconds
-  
-  for (const [sessionId, context] of sessionContexts.entries()) {
-    if (now - context.lastActivity.getTime() > oneHour) {
-      sessionContexts.delete(sessionId);
-      console.log(`[Chat] Cleared inactive session: ${sessionId}`);
+/**
+ * Load prompt template from file
+ */
+function loadPromptTemplate(templateName: string): string {
+  const possiblePaths = [
+    path.join(__dirname, `../../prompts/${templateName}`),
+    path.join(process.cwd(), `prompts/${templateName}`),
+    path.join(process.cwd(), `backend/prompts/${templateName}`),
+  ];
+
+  for (const templatePath of possiblePaths) {
+    if (fs.existsSync(templatePath)) {
+      return fs.readFileSync(templatePath, 'utf-8');
     }
   }
-}, 5 * 60 * 1000); // Check every 5 minutes
 
-// Load policy rules for context
-function getPolicyContext(): string {
+  console.warn(`[Chat] Template not found: ${templateName}, using fallback`);
+  return `Template ${templateName} not found. Please answer naturally.`;
+}
+
+/**
+ * Get inbox/tasks context for conversational responses
+ */
+async function getInboxContext(): Promise<string> {
   try {
-    const policyPath = path.join(__dirname, '../../policy.json');
-    if (fs.existsSync(policyPath)) {
-      const policy = JSON.parse(fs.readFileSync(policyPath, 'utf-8'));
-      return JSON.stringify(policy.rules || [], null, 2);
+    await pool.query('SELECT 1');
+    
+    const inboxResult = await pool.query(`
+      SELECT COUNT(*) as total, 
+             COUNT(*) FILTER (WHERE read_at IS NULL) as unread,
+             COUNT(*) FILTER (WHERE EXISTS (
+               SELECT 1 FROM contacts c WHERE c.id = messages.contact_id AND c.tags::text LIKE '%lead%'
+             )) as leads
+      FROM messages
+    `);
+    
+    const tasksResult = await pool.query(`
+      SELECT 
+        COUNT(*) FILTER (WHERE priority = 'P0') as p0,
+        COUNT(*) FILTER (WHERE priority = 'P1') as p1,
+        COUNT(*) FILTER (WHERE status = 'pending') as pending
+      FROM tasks
+    `);
+    
+    if (inboxResult.rows.length > 0 && tasksResult.rows.length > 0) {
+      const inbox = inboxResult.rows[0];
+      const tasks = tasksResult.rows[0];
+      return `Inbox: ${inbox.total} messages (${inbox.unread} unread, ${inbox.leads} leads). Tasks: ${tasks.pending} pending (${tasks.p0} urgent).`;
     }
   } catch (error) {
-    console.error('Error loading policy:', error);
+    // Database unavailable
   }
-  return 'No policy rules available';
+  return 'Context unavailable.';
 }
 
-// Load comprehensive policy document
-function getPolicyDocument(): string {
+/**
+ * Save prompt snapshot and audit log
+ */
+async function saveAuditLog(
+  correlationId: string,
+  userMessage: string,
+  intent: IntentType,
+  intentConfidence: number,
+  promptSnapshot: string,
+  retrievedIds: string[],
+  modelResponse: string,
+  finalText: string,
+  latencyMs: number,
+  needsManualLabel: boolean = false
+): Promise<string | null> {
   try {
-    // Try multiple possible paths (dev and production)
-    const possiblePaths = [
-      // Production (compiled to dist/)
-      path.join(__dirname, '../../policies/company-policy.md'),
-      path.join(__dirname, '../../../backend/policies/company-policy.md'),
-      // Development
-      path.join(process.cwd(), 'backend/policies/company-policy.md'),
-      path.join(process.cwd(), 'policies/company-policy.md'),
-      // Absolute path fallback
-      path.resolve(process.cwd(), 'backend/policies/company-policy.md'),
-      path.resolve(process.cwd(), 'policies/company-policy.md'),
-    ];
-
-    for (const policyPath of possiblePaths) {
-      if (fs.existsSync(policyPath)) {
-        const content = fs.readFileSync(policyPath, 'utf-8');
-        console.log(`[Chat] Policy document loaded from: ${policyPath} (${content.length} chars)`);
-        return content;
-      }
+    // Save gzipped prompt
+    const storageDir = path.join(process.cwd(), 'backend/storage/prompts');
+    if (!fs.existsSync(storageDir)) {
+      fs.mkdirSync(storageDir, { recursive: true });
     }
     
-    console.warn('[Chat] Policy document not found. Tried paths:', possiblePaths);
+    const gzipPath = path.join(storageDir, `${correlationId}.gz`);
+    const gzipped = await gzipAsync(Buffer.from(promptSnapshot, 'utf-8'));
+    fs.writeFileSync(gzipPath, gzipped);
+    
+    // Save to audit table
+    const suggestionId = uuidv4();
+    await pool.query(
+      `INSERT INTO suggestions (id, prompt, retrieved_ids, model_response, final_text)
+       VALUES ($1, $2, $3, $4, $5)`,
+      [suggestionId, promptSnapshot.substring(0, 4000), JSON.stringify(retrievedIds), modelResponse, finalText]
+    );
+    
+    await pool.query(
+      `INSERT INTO events (type, correlation_id, prompt_ref, retrieved_ids, raw_model_response, final_text, latency_ms, payload)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+      [
+        'chat_intent_routed',
+        correlationId,
+        gzipPath,
+        JSON.stringify(retrievedIds),
+        modelResponse,
+        finalText,
+        latencyMs,
+        JSON.stringify({
+          intent,
+          intent_confidence: intentConfidence,
+          needs_manual_label: needsManualLabel,
+          user_message: userMessage.substring(0, 200),
+        }),
+      ]
+    );
+    
+    return suggestionId;
   } catch (error: any) {
-    console.error('[Chat] Error loading policy document:', error.message);
+    console.error('[Chat] Failed to save audit log:', error.message);
+    return null;
   }
-  return '';
 }
 
-// POST /api/chat - Answer questions about inbox, policies, tasks
+/**
+ * Handle general_intent - conversational assistant
+ */
+async function handleGeneralIntent(
+  userMessage: string,
+  correlationId: string,
+  conversationHistory: LLMMessage[]
+): Promise<{ text: string; suggestionId: string | null }> {
+  const startTime = Date.now();
+  
+  const template = loadPromptTemplate('assistant_conversational.md');
+  const context = await getInboxContext();
+  
+  const systemPrompt = template
+    .replace('{context}', context)
+    .replace('{user_message}', userMessage);
+  
+  const messages: LLMMessage[] = [
+    { role: 'system', content: systemPrompt },
+    ...conversationHistory.slice(-5),
+    { role: 'user', content: userMessage },
+  ];
+  
+  const temperature = parseFloat(process.env.LLM_GENERAL_TEMP || '0.3');
+  const llmResponse = await generateChatCompletion({
+    model: process.env.LLM_MODEL || 'tinyllama',
+    messages,
+    temperature,
+    max_tokens: 200,
+    useLocal: process.env.USE_OLLAMA !== 'false',
+    correlationId,
+  });
+  
+  const text = llmResponse.content.trim();
+  const latencyMs = Date.now() - startTime;
+  
+  const suggestionId = await saveAuditLog(
+    correlationId,
+    userMessage,
+    'general_intent',
+    1.0,
+    systemPrompt,
+    [],
+    text,
+    text,
+    latencyMs
+  );
+  
+  return { text, suggestionId };
+}
+
+/**
+ * Handle policy_intent - RAG with citations
+ */
+async function handlePolicyIntent(
+  userMessage: string,
+  correlationId: string,
+  conversationHistory: LLMMessage[]
+): Promise<{ text: string; citations: Array<{ id: string; score: number; textSnippet: string }>; suggestionId: string | null }> {
+  const startTime = Date.now();
+  
+  // Retrieve policy chunks
+  let retrievedChunks: Array<{ id: string; text: string; score: number; metadata: any }> = [];
+  try {
+    const vectorResults = await query(userMessage, 3);
+    retrievedChunks = vectorResults.map(r => ({
+      id: r.id,
+      text: r.text,
+      score: r.score,
+      metadata: r.metadata || {},
+    }));
+  } catch (error: any) {
+    console.warn('[Chat] Vector store query failed:', error.message);
+  }
+  
+  // Build prompt from template
+  const template = loadPromptTemplate('policy_chat_template.md');
+  const chunksText = retrievedChunks.length > 0
+    ? retrievedChunks.map((chunk, i) => `§${i + 1}. ${chunk.text.substring(0, 200)}... (ID: ${chunk.id}, Score: ${chunk.score.toFixed(2)})`).join('\n\n')
+    : 'No relevant policy chunks found.';
+  
+  const systemPrompt = template
+    .replace('{persona}', 'You are Soraya, a helpful AI assistant.')
+    .replace('{tone}', 'warm')
+    .replace('{retrieved_chunks}', chunksText)
+    .replace('{conversation}', conversationHistory.length > 0 ? 'Previous conversation available.' : 'No previous messages.')
+    .replace('{user_message}', userMessage);
+  
+  const messages: LLMMessage[] = [
+    { role: 'system', content: systemPrompt },
+    { role: 'user', content: userMessage },
+  ];
+  
+  const temperature = parseFloat(process.env.LLM_POLICY_TEMP || '0.1');
+  const llmResponse = await generateChatCompletion({
+    model: process.env.LLM_MODEL || 'tinyllama',
+    messages,
+    temperature,
+    max_tokens: 250,
+    useLocal: process.env.USE_OLLAMA !== 'false',
+    correlationId,
+  });
+  
+  let text = llmResponse.content.trim();
+  
+  // Fallback if no chunks found
+  if (retrievedChunks.length === 0 && !text.includes('(Policy')) {
+    text = `I couldn't find policy references, answering generally: ${text}`;
+    console.warn('[Chat] Policy intent but no chunks retrieved');
+  }
+  
+  const latencyMs = Date.now() - startTime;
+  const citations = retrievedChunks.map(chunk => ({
+    id: chunk.id,
+    score: chunk.score,
+    textSnippet: chunk.text.substring(0, 200) + (chunk.text.length > 200 ? '...' : ''),
+  }));
+  
+  const suggestionId = await saveAuditLog(
+    correlationId,
+    userMessage,
+    'policy_intent',
+    1.0,
+    systemPrompt,
+    retrievedChunks.map(c => c.id),
+    text,
+    text,
+    latencyMs
+  );
+  
+  return { text, citations, suggestionId };
+}
+
+/**
+ * Handle action_intent - extract entities and perform action
+ */
+async function handleActionIntent(
+  userMessage: string,
+  correlationId: string,
+  conversationHistory: LLMMessage[]
+): Promise<{ text: string; action_suggestion?: any; suggestionId: string | null }> {
+  const startTime = Date.now();
+  
+  // Check policy safety first
+  const policyCheck = checkPolicy(userMessage);
+  if (policyCheck.action === 'ESCALATE') {
+    return {
+      text: 'This action requires human review due to sensitive content. I\'m escalating this to a human reviewer.',
+      suggestionId: null,
+    };
+  }
+  
+  // Use action planner prompt
+  const template = loadPromptTemplate('action_planner.md');
+  const systemPrompt = template.replace('{user_message}', userMessage);
+  
+  const messages: LLMMessage[] = [
+    { role: 'system', content: systemPrompt },
+    { role: 'user', content: userMessage },
+  ];
+  
+  const temperature = parseFloat(process.env.LLM_ACTION_TEMP || '0.0');
+  const llmResponse = await generateChatCompletion({
+    model: process.env.LLM_MODEL || 'tinyllama',
+    messages,
+    temperature,
+    max_tokens: 300,
+    useLocal: process.env.USE_OLLAMA !== 'false',
+    correlationId,
+  });
+  
+  // Parse action JSON
+  let actionData: any = null;
+  try {
+    const jsonMatch = llmResponse.content.match(/\{[\s\S]*\}/);
+    if (jsonMatch) {
+      actionData = JSON.parse(jsonMatch[0]);
+    }
+  } catch (error) {
+    console.warn('[Chat] Failed to parse action JSON, using fallback');
+  }
+  
+  let text = llmResponse.content.trim();
+  let actionSuggestion: any = null;
+  
+  if (actionData) {
+    actionSuggestion = {
+      action_type: actionData.action_type || 'other',
+      confirm_needed: actionData.confirm_needed || false,
+      extracted_data: {
+        title: actionData.title,
+        start: actionData.start,
+        end: actionData.end,
+        attendees: actionData.attendees || [],
+      },
+    };
+    
+    // If no confirmation needed and we have calendar event data, create it
+    if (!actionData.confirm_needed && actionData.action_type === 'calendar_event' && actionData.title && actionData.start) {
+      try {
+        const calendarParseUrl = `http://localhost:${process.env.PORT || 3001}/api/calendar/parse`;
+        const calendarResponse = await fetch(calendarParseUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ text: userMessage }),
+        });
+        
+        if (calendarResponse.ok) {
+          const calendarData = await calendarResponse.json() as { event: any };
+          text = actionData.reply_text || `✅ I've added "${calendarData.event.title}" to your calendar.`;
+          actionSuggestion.extracted_data.eventId = calendarData.event.id;
+        }
+      } catch (error: any) {
+        console.warn('[Chat] Calendar creation failed:', error.message);
+        text = actionData.reply_text || text;
+      }
+    } else {
+      text = actionData.reply_text || text;
+    }
+  }
+  
+  const latencyMs = Date.now() - startTime;
+  const suggestionId = await saveAuditLog(
+    correlationId,
+    userMessage,
+    'action_intent',
+    1.0,
+    systemPrompt,
+    [],
+    llmResponse.content,
+    text,
+    latencyMs
+  );
+  
+  return { text, action_suggestion: actionSuggestion, suggestionId };
+}
+
+/**
+ * POST /api/chat - Main chat endpoint with intent-based routing
+ */
 router.post('/', async (req: Request, res: Response) => {
   try {
-    const { question, conversationHistory, sessionId } = req.body;
+    const { threadId, userMessage, tone, correlationId: providedCorrelationId }: ChatRequest = req.body;
 
-    if (!question || typeof question !== 'string') {
-      return res.status(400).json({ error: 'Question is required' });
+    if (!userMessage || typeof userMessage !== 'string') {
+      return res.status(400).json({ error: 'userMessage is required' });
     }
 
-    // Use agentic chat agent (maintains state and context, creates calendar events automatically)
-    try {
-      const agentSessionId = sessionId || `agent_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-      const result = await runAgenticChat(question, agentSessionId, conversationHistory);
-      
-      return res.json({
-        answer: result.answer,
-        model: process.env.LLM_MODEL || 'tinyllama',
-        calendarEvent: result.calendarEvent,
-        sessionId: result.sessionId,
-      });
-    } catch (agentError: any) {
-      console.error('[Chat] Agentic chat error, falling back to simple chat:', agentError);
-      // Fall through to simple chat implementation below
-    }
+    const correlationId = providedCorrelationId || uuidv4();
+    const startTime = Date.now();
 
-    // Fallback: Simple chat implementation (if agentic chat fails)
-    // Get or create session context
-    let sessionContext: SessionContext;
-    if (sessionId && sessionContexts.has(sessionId)) {
-      sessionContext = sessionContexts.get(sessionId)!;
-      sessionContext.lastActivity = new Date();
-    } else {
-      // Create new session
-      const newSessionId = sessionId || `session_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-      sessionContext = {
-        messages: [],
-        lastActivity: new Date(),
+    // Classify intent
+    const intentResult = await classifyIntent(userMessage);
+    const confidenceThreshold = parseFloat(process.env.INTENT_RULES_CONFIDENCE_THRESHOLD || '0.75');
+    const needsManualLabel = intentResult.confidence < confidenceThreshold;
+
+    console.log(`[Chat] Intent: ${intentResult.intent} (confidence: ${intentResult.confidence.toFixed(2)})`);
+
+    // Get conversation history (simplified - could load from DB using threadId)
+    const conversationHistory: LLMMessage[] = [];
+
+    let response: ChatResponse;
+
+    // Route based on intent
+    if (intentResult.intent === 'policy_intent') {
+      const result = await handlePolicyIntent(userMessage, correlationId, conversationHistory);
+      response = {
+        kind: 'policy',
+        text: result.text,
+        citations: result.citations,
+        suggestionId: result.suggestionId,
+        intent: 'policy_intent',
+        intent_confidence: intentResult.confidence,
       };
-      if (sessionId) {
-        sessionContexts.set(sessionId, sessionContext);
-      }
+    } else if (intentResult.intent === 'action_intent') {
+      const result = await handleActionIntent(userMessage, correlationId, conversationHistory);
+      response = {
+        kind: 'action',
+        text: result.text,
+        action_suggestion: result.action_suggestion,
+        suggestionId: result.suggestionId,
+        intent: 'action_intent',
+        intent_confidence: intentResult.confidence,
+      };
+    } else {
+      // general_intent
+      const result = await handleGeneralIntent(userMessage, correlationId, conversationHistory);
+      response = {
+        kind: 'assistant',
+        text: result.text,
+        suggestionId: result.suggestionId,
+        intent: 'general_intent',
+        intent_confidence: intentResult.confidence,
+      };
     }
 
-    // Build conversation history from provided history or session context
-    let conversationMessages: LLMMessage[] = [];
-    
-    // Use provided conversation history if available, otherwise use session context
-    if (conversationHistory && Array.isArray(conversationHistory)) {
-      conversationMessages = conversationHistory
-        .slice(-10) // Limit to last 10 messages
-        .map((msg: any) => ({
-          role: msg.role === 'user' ? 'user' : 'assistant',
-          content: msg.content,
-        })) as LLMMessage[];
-    } else if (sessionContext.messages.length > 0) {
-      conversationMessages = sessionContext.messages.slice(-10);
-    }
-
-    // Add current question to conversation
-    conversationMessages.push({
-      role: 'user',
-      content: question.substring(0, 200), // Limit question length
-    });
-
-    // Gather context about inbox, tasks, and policies
-    let inboxContext = '';
-    let tasksContext = '';
-    
-    try {
-      // Check if database is available
-      await pool.query('SELECT 1');
-      
-      // Get inbox summary
-      const inboxResult = await pool.query(`
-        SELECT COUNT(*) as total, 
-               COUNT(*) FILTER (WHERE read_at IS NULL) as unread,
-               COUNT(*) FILTER (WHERE EXISTS (
-                 SELECT 1 FROM contacts c WHERE c.id = messages.contact_id AND c.tags::text LIKE '%lead%'
-               )) as leads
-        FROM messages
-      `);
-      
-      if (inboxResult.rows.length > 0) {
-        const stats = inboxResult.rows[0];
-        inboxContext = `Inbox Stats: ${stats.total} total messages, ${stats.unread} unread, ${stats.leads} leads.`;
-      }
-
-      // Get tasks summary
-      const tasksResult = await pool.query(`
-        SELECT 
-          COUNT(*) FILTER (WHERE priority = 'P0') as p0,
-          COUNT(*) FILTER (WHERE priority = 'P1') as p1,
-          COUNT(*) FILTER (WHERE priority = 'P2') as p2,
-          COUNT(*) FILTER (WHERE status = 'pending') as pending
-        FROM tasks
-      `);
-      
-      if (tasksResult.rows.length > 0) {
-        const stats = tasksResult.rows[0];
-        tasksContext = `Tasks: ${stats.pending} pending (${stats.p0} P0 urgent, ${stats.p1} P1 high, ${stats.p2} P2 normal).`;
-      }
-    } catch (dbError: any) {
-      console.warn('Could not fetch context from database:', dbError?.message || dbError);
-      // Continue without context - use default values
-      inboxContext = 'Database unavailable - using offline mode.';
-      tasksContext = '';
-    }
-
-    // Only load policy if explicitly asked - don't auto-include
-    const questionLower = question.toLowerCase();
-    const needsPolicyDoc = 
-      questionLower.includes('policy') || 
-      questionLower.includes('rule') || 
-      questionLower.includes('escalat') || 
-      questionLower.includes('guideline') || 
-      questionLower.includes('procedure') ||
-      questionLower.includes('what should i do') ||
-      questionLower.includes('how should i handle');
-    
-    const policyRules = needsPolicyDoc ? getPolicyContext() : 'No policy rules available';
-    const policyDocument = needsPolicyDoc ? getPolicyDocument() : ''; // Only load if needed
-
-    // Check if this is a calendar event creation request - be more intelligent
-    const isCalendarRequest = 
-      (questionLower.includes('schedule') || questionLower.includes('book') || questionLower.includes('plan')) ||
-      (questionLower.includes('meeting') && (questionLower.includes('tomorrow') || questionLower.includes('today') || questionLower.includes('next') || questionLower.includes('at') || questionLower.includes('on'))) ||
-      (questionLower.includes('event') && (questionLower.includes('add') || questionLower.includes('create') || questionLower.includes('set'))) ||
-      (questionLower.includes('calendar') && (questionLower.includes('add') || questionLower.includes('create'))) ||
-      (questionLower.includes('appointment')) ||
-      (questionLower.includes('remind') && (questionLower.includes('me') || questionLower.includes('tomorrow') || questionLower.includes('today'))) ||
-      ((questionLower.includes('add') || questionLower.includes('create') || questionLower.includes('set')) && 
-       (questionLower.includes('tomorrow') || questionLower.includes('today') || questionLower.includes('next week') || questionLower.includes('monday') || questionLower.includes('tuesday') || questionLower.includes('wednesday') || questionLower.includes('thursday') || questionLower.includes('friday') || questionLower.includes('saturday') || questionLower.includes('sunday')));
-
-    if (isCalendarRequest) {
-      // Forward to calendar parse endpoint
+    // Update audit log with needs_manual_label if confidence is low
+    if (needsManualLabel && response.suggestionId) {
       try {
-        const calendarModule = await import('./calendar');
-        // We'll handle this in the response by calling the calendar API
-        // For now, let's add calendar context to the system prompt
+        await pool.query(
+          `UPDATE events SET payload = jsonb_set(payload, '{needs_manual_label}', 'true'::jsonb)
+           WHERE correlation_id = $1`,
+          [correlationId]
+        );
       } catch (error) {
-        // Continue with normal chat if calendar module not available
+        // Ignore update errors
       }
     }
 
-    // Build concise system prompt - check if it's a simple greeting
-    const isSimpleGreeting = /^(hi|hello|hey|greetings|good morning|good afternoon|good evening)$/i.test(question.trim());
-    
-    let systemPrompt = `You are Soraya AI, a helpful assistant for managing inbox, tasks, and calendar.`;
-
-    // Only add context for non-greetings
-    if (!isSimpleGreeting && (inboxContext || tasksContext)) {
-      systemPrompt += `\n\nCurrent Context:\n${inboxContext} ${tasksContext}`;
-    }
-
-    systemPrompt += `\n\nYour capabilities:
-- Answer questions about inbox, tasks, and calendar
-- Create calendar events when asked (I will handle the creation automatically)
-
-Guidelines:
-- Be natural and conversational
-- For simple greetings like "Hi" or "Hello", just greet back naturally - don't list capabilities or context
-- Only provide information that's directly relevant to the question
-- Don't mention policies, rules, escalation keywords, or technical details unless explicitly asked
-- Keep responses concise and helpful (maximum 250 words)`;
-
-    try {
-      // Only include policy information if explicitly asked AND not a simple greeting
-      if (needsPolicyDoc && !isSimpleGreeting) {
-        // Safely parse policy rules
-        if (policyRules && policyRules !== 'No policy rules available') {
-          try {
-            const parsedRules = JSON.parse(policyRules);
-            if (Array.isArray(parsedRules) && parsedRules.length > 0) {
-              systemPrompt += `\n\nEscalation Rules (only mention if relevant): ${JSON.stringify(parsedRules.slice(0, 3))}`;
-            }
-          } catch (e) {
-            // Ignore JSON parse errors
-          }
-        }
-
-        // Include policy document only if asked
-        if (policyDocument) {
-          systemPrompt += `\n\nCompany Policy Document:\n${policyDocument}`;
-        } else {
-          console.warn('[Chat] Policy document not available - check file path');
-        }
-      }
-
-      systemPrompt += '\n\nKeep answers short, accurate, and direct. Maximum 250 words. Only provide information relevant to the question.';
-    } catch (promptError: any) {
-      console.warn('[Chat] Error building prompt:', promptError.message);
-      // Continue with basic prompt
-    }
-
-    // Generate response using LLM
-    try {
-      // Determine if we should use Ollama (default to true if not explicitly set to false)
-      const useOllama = process.env.USE_OLLAMA !== 'false';
-      const model = process.env.LLM_MODEL || process.env.OPENAI_MODEL || 'tinyllama';
-      
-      console.log(`[Chat] Using model: ${model}, Ollama: ${useOllama}, USE_OLLAMA env: ${process.env.USE_OLLAMA}`);
-      
-      // Build messages array with system prompt, conversation history, and current question
-      const llmMessages: LLMMessage[] = [
-        {
-          role: 'system',
-          content: systemPrompt.substring(0, 1000), // Limit system prompt size for speed
-        },
-        ...conversationMessages.slice(0, -1), // All conversation history except the current question
-        conversationMessages[conversationMessages.length - 1], // Current question (last item)
-      ];
-
-      const llmResponse = await generateChatCompletion({
-        model,
-        messages: llmMessages,
-        temperature: 0.6, // Optimized for tinyllama (was 0.3)
-        max_tokens: 200, // Limited to ~150 words (under 250 words requirement)
-        useLocal: useOllama,
-      });
-
-      if (!llmResponse) {
-        throw new Error('LLM returned null response');
-      }
-
-      if (!llmResponse.content || typeof llmResponse.content !== 'string') {
-        throw new Error(`LLM returned invalid response: ${JSON.stringify(llmResponse)}`);
-      }
-
-      let answer = llmResponse.content.trim();
-      if (!answer) {
-        throw new Error('LLM returned empty answer');
-      }
-
-      // Update session context with new messages
-      if (sessionId && sessionContext) {
-        // Add user question and assistant response to session context
-        sessionContext.messages.push({
-          role: 'user',
-          content: question.substring(0, 200),
-        });
-        sessionContext.messages.push({
-          role: 'assistant',
-          content: answer,
-        });
-        
-        // Keep only last 20 messages in session context to prevent memory bloat
-        if (sessionContext.messages.length > 20) {
-          sessionContext.messages = sessionContext.messages.slice(-20);
-        }
-        
-        sessionContext.lastActivity = new Date();
-      }
-
-      // If this is a calendar request, automatically parse and create the event (agentic)
-      let calendarEvent = null;
-      if (isCalendarRequest) {
-        try {
-          // Use native fetch (Node 18+) to call our own API
-          const calendarParseUrl = `http://localhost:${process.env.PORT || 3001}/api/calendar/parse`;
-          const calendarResponse = await fetch(calendarParseUrl, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ text: question }),
-          });
-          
-          if (calendarResponse.ok) {
-            const calendarData = await calendarResponse.json() as { event: any; parsed: any };
-            calendarEvent = calendarData.event;
-            
-            // Update the answer to confirm the event was created automatically
-            const eventTime = new Date(calendarEvent.start_time).toLocaleString('en-US', {
-              weekday: 'long',
-              month: 'short',
-              day: 'numeric',
-              hour: 'numeric',
-              minute: '2-digit',
-            });
-            
-            answer = `✅ I've added "${calendarEvent.title}" to your calendar for ${eventTime}.`;
-            if (calendarEvent.is_recurring) {
-              answer += ` This is a ${calendarEvent.recurrence_pattern} recurring event.`;
-            }
-            if (calendarEvent.location) {
-              answer += ` Location: ${calendarEvent.location}.`;
-            }
-            if (calendarEvent.description) {
-              answer += `\n\n${calendarEvent.description}`;
-            }
-          }
-        } catch (error: any) {
-          console.warn('[Chat] Could not create calendar event:', error.message);
-          // Continue with normal answer - don't fail the whole request
-        }
-      }
-
-      return res.json({
-        answer,
-        model: llmResponse.model || model,
-        calendarEvent, // Include created event if applicable
-        sessionId: sessionId || undefined, // Return session ID for frontend to maintain
-      });
-    } catch (llmError: any) {
-      console.error('[Chat] LLM generation error:', llmError);
-      console.error('[Chat] Error stack:', llmError.stack);
-      
-      // Provide more helpful error message
-      let errorDetails = llmError.message || 'Unknown error';
-      if (errorDetails.includes('All LLM adapters failed') || errorDetails.includes('ECONNREFUSED')) {
-        const modelName = process.env.LLM_MODEL || 'tinyllama';
-        errorDetails = `LLM service unavailable. Please ensure Ollama is running on port 11434 and the ${modelName} model is installed. Run: ollama pull ${modelName}`;
-      }
-      
-      return res.status(500).json({
-        error: 'Failed to generate response',
-        details: errorDetails,
-      });
-    }
+    return res.json(response);
   } catch (error: any) {
-    console.error('Chat error:', error);
+    console.error('[Chat] Error:', error);
     return res.status(500).json({
-      error: 'Failed to process question',
-      details: error.message || 'Unknown error occurred',
+      error: 'Failed to process chat',
+      details: error.message || 'Unknown error',
     });
   }
 });
 
-export default router;
+/**
+ * POST /api/chat/rag - Deprecated alias (always uses policy RAG)
+ */
+router.post('/rag', async (req: Request, res: Response) => {
+  console.warn('[Chat] /api/chat/rag is deprecated. Use /api/chat instead.');
+  
+  try {
+    const { threadId, userMessage, tone, rag = true }: any = req.body;
+    
+    if (!userMessage) {
+      return res.status(400).json({ error: 'userMessage is required' });
+    }
 
+    const correlationId = uuidv4();
+    const conversationHistory: LLMMessage[] = [];
+    
+    // Force policy intent flow
+    const result = await handlePolicyIntent(userMessage, correlationId, conversationHistory);
+    
+    return res.json({
+      reply: result.text,
+      citations: result.citations,
+      suggestionId: result.suggestionId,
+      escalated: false,
+    });
+  } catch (error: any) {
+    console.error('[Chat] RAG endpoint error:', error);
+    return res.status(500).json({ error: 'Failed to process RAG chat', details: error.message });
+  }
+});
+
+export default router;

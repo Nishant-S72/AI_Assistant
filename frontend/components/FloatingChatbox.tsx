@@ -7,8 +7,9 @@
 
 import { useState, useRef, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { ragChat, RAGChatResponse, Citation } from '@/lib/api';
+import { chat, ChatResponse, Citation } from '@/lib/api';
 import AiThinkingDots from './AiThinkingDots';
+import { BookOpen, AlertTriangle } from 'lucide-react';
 
 interface Message {
   role: 'user' | 'assistant';
@@ -18,6 +19,12 @@ interface Message {
   suggestionId?: string | null;
   escalated?: boolean;
   escalationReasons?: string[];
+  intent?: 'policy_intent' | 'action_intent' | 'general_intent';
+  action_suggestion?: {
+    action_type: string;
+    confirm_needed: boolean;
+    extracted_data?: any;
+  };
 }
 
 export default function FloatingChatbox() {
@@ -32,7 +39,6 @@ export default function FloatingChatbox() {
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [tone, setTone] = useState<'formal' | 'warm' | 'crisp'>('warm');
-  const [ragEnabled, setRagEnabled] = useState(true);
   const [showSources, setShowSources] = useState<number | null>(null);
   const [escalated, setEscalated] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -126,11 +132,10 @@ export default function FloatingChatbox() {
     }, 3600000);
 
     try {
-      const response = await ragChat.sendMessage({
+      const response = await chat.sendMessage({
         threadId: threadIdRef.current || undefined,
         userMessage: userMessage.content,
         tone,
-        rag: ragEnabled,
       });
 
       // Check for escalation
@@ -140,12 +145,13 @@ export default function FloatingChatbox() {
 
       const assistantMessage: Message = {
         role: 'assistant',
-        content: response.reply,
+        content: response.text,
         timestamp: new Date(),
         citations: response.citations,
         suggestionId: response.suggestionId,
         escalated: response.escalated,
-        escalationReasons: response.reasons,
+        intent: response.intent,
+        action_suggestion: response.action_suggestion,
       };
 
       setMessages((prev) => [...prev, assistantMessage]);
@@ -153,13 +159,19 @@ export default function FloatingChatbox() {
       // Send feedback automatically (accepted)
       if (response.suggestionId) {
         try {
-          await ragChat.sendFeedback({
+          await chat.sendFeedback({
             suggestionId: response.suggestionId,
             accepted: true,
           });
         } catch (e) {
           console.warn('Failed to send feedback:', e);
         }
+      }
+      
+      // Handle action confirmations
+      if (response.action_suggestion?.confirm_needed && response.action_suggestion.extracted_data) {
+        // Could show confirmation buttons here
+        console.log('[Chat] Action requires confirmation:', response.action_suggestion);
       }
     } catch (error: any) {
       console.error('Chat error:', error);
@@ -226,15 +238,6 @@ export default function FloatingChatbox() {
               
               {/* Controls */}
               <div className="flex items-center gap-3 text-xs">
-                <label className="flex items-center gap-1.5 cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={ragEnabled}
-                    onChange={(e) => setRagEnabled(e.target.checked)}
-                    className="w-3 h-3"
-                  />
-                  <span className="text-theme-muted">RAG: Policy</span>
-                </label>
                 <select
                   value={tone}
                   onChange={(e) => setTone(e.target.value as 'formal' | 'warm' | 'crisp')}
@@ -266,6 +269,14 @@ export default function FloatingChatbox() {
                         : 'bg-white/60 dark:bg-[var(--card-bg)] border border-[var(--glass-border)] text-theme-primary'
                     }`}
                   >
+                    {/* Policy Badge */}
+                    {msg.intent === 'policy_intent' && (
+                      <div className="mb-2 flex items-center gap-1.5 text-xs text-blue-600">
+                        <BookOpen className="w-3 h-3" />
+                        <span className="font-medium">Policy-backed answer</span>
+                      </div>
+                    )}
+                    
                     <p className="text-sm leading-relaxed whitespace-pre-wrap">{msg.content}</p>
                     
                     {/* Citations */}
@@ -273,8 +284,9 @@ export default function FloatingChatbox() {
                       <div className="mt-2 pt-2 border-t border-gray-300/30">
                         <button
                           onClick={() => setShowSources(showSources === idx ? null : idx)}
-                          className="text-xs text-blue-600 hover:underline"
+                          className="text-xs text-blue-600 hover:underline flex items-center gap-1"
                         >
+                          <BookOpen className="w-3 h-3" />
                           {showSources === idx ? 'Hide' : 'Show'} sources ({msg.citations.length})
                         </button>
                         {showSources === idx && (
@@ -287,6 +299,21 @@ export default function FloatingChatbox() {
                             ))}
                           </div>
                         )}
+                      </div>
+                    )}
+                    
+                    {/* Action Confirmation */}
+                    {msg.action_suggestion?.confirm_needed && (
+                      <div className="mt-2 pt-2 border-t border-gray-300/30">
+                        <p className="text-xs text-gray-600 mb-2">Action requires confirmation:</p>
+                        <div className="flex gap-2">
+                          <button className="text-xs px-3 py-1 bg-blue-500 text-white rounded hover:bg-blue-600">
+                            Confirm
+                          </button>
+                          <button className="text-xs px-3 py-1 bg-gray-200 text-gray-700 rounded hover:bg-gray-300">
+                            Cancel
+                          </button>
+                        </div>
                       </div>
                     )}
                   </div>
