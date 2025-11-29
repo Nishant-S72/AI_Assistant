@@ -105,54 +105,5 @@ router.get('/metrics', requireAuth, async (req: Request, res: Response) => {
   }
 });
 
-// GET /api/metrics - Public metrics endpoint (no auth required for POC)
-router.get('/metrics', async (req: Request, res: Response) => {
-  try {
-    // Suggestions generated
-    const suggestionsResult = await pool.query(
-      `SELECT COUNT(*) as count FROM suggestions`
-    );
-    const suggestionsGenerated = parseInt(suggestionsResult.rows[0].count);
-
-    // Acceptance rate
-    const acceptedResult = await pool.query(
-      `SELECT COUNT(*) as count 
-       FROM suggestions 
-       WHERE final_text IS NOT NULL 
-       AND final_text = model_response 
-       AND edited = false`
-    );
-    const accepted = parseInt(acceptedResult.rows[0].count);
-    const acceptanceRate = suggestionsGenerated > 0 ? accepted / suggestionsGenerated : 0;
-
-    // Average latency
-    const latencyResult = await pool.query(
-      `SELECT AVG(latency_ms) as avg_latency 
-       FROM events 
-       WHERE latency_ms IS NOT NULL 
-       AND type = 'suggestion_generated'`
-    );
-    const avgLatency = latencyResult.rows[0].avg_latency
-      ? Math.round(parseFloat(latencyResult.rows[0].avg_latency))
-      : null;
-
-    // Messages sent
-    const sentResult = await pool.query(
-      `SELECT COUNT(*) as count FROM events WHERE type = 'message_sent'`
-    );
-    const messagesSent = parseInt(sentResult.rows[0].count);
-
-    res.json({
-      suggestionsGenerated,
-      acceptanceRate: Math.round(acceptanceRate * 100) / 100,
-      avgLatencyMs: avgLatency,
-      messagesSent,
-    });
-  } catch (error) {
-    console.error('Error fetching metrics:', error);
-    res.status(500).json({ error: 'Failed to fetch metrics' });
-  }
-});
-
 export default router;
 

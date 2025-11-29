@@ -350,7 +350,7 @@ What do you notice?`;
             ],
             max_tokens: 80, // Limited to ~60 words for conversation summaries
             temperature: 0.7,
-            useLocal: process.env.USE_OLLAMA === 'true',
+            useLocal: process.env.USE_OLLAMA !== 'false', // Default to Ollama if not explicitly false
           });
 
           return {
@@ -419,7 +419,7 @@ What do you notice?`;
           ],
           max_tokens: 150, // Limited to ~110 words (under 250 words requirement)
           temperature: 0.7,
-          useLocal: process.env.USE_OLLAMA === 'true',
+          useLocal: process.env.USE_OLLAMA !== 'false', // Default to Ollama if not explicitly false
         });
 
         // Generate conversation summaries with retry
@@ -440,7 +440,7 @@ What do you notice?`;
                 ],
                 max_tokens: 80, // Limited to ~60 words for conversation summaries
                 temperature: 0.7,
-                useLocal: process.env.USE_OLLAMA === 'true',
+                useLocal: process.env.USE_OLLAMA !== 'false', // Default to Ollama if not explicitly false
               });
 
               return {

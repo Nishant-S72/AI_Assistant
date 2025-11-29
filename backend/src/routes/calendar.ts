@@ -144,7 +144,7 @@ Return ONLY the JSON object, nothing else.`;
       ] as LLMMessage[],
       temperature: 0.0, // Very low temperature for deterministic JSON
       max_tokens: 150,
-      useLocal: process.env.USE_OLLAMA === 'true',
+      useLocal: process.env.USE_OLLAMA !== 'false', // Default to Ollama if not explicitly false
     });
 
     // Parse LLM response (should be JSON)

@@ -228,7 +228,7 @@ router.post('/:id/generate', async (req: Request, res: Response) => {
       ] as LLMMessage[],
       temperature: 0.5, // Optimized for tinyllama (was 0.3)
       max_tokens: 150, // Limited to ~110 words for email replies
-      useLocal: process.env.USE_OLLAMA === 'true',
+      useLocal: process.env.USE_OLLAMA !== 'false', // Default to Ollama if not explicitly false
       correlationId,
     });
 

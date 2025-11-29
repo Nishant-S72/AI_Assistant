@@ -312,7 +312,7 @@ Give me a concise summary of what's happening. Be specific about who needs atten
           ] as LLMMessage[],
           temperature: 0.7, // Balanced for natural but coherent
           max_tokens: 200, // Limited to ~150 words (under 250 words requirement)
-          useLocal: process.env.USE_OLLAMA === 'true',
+          useLocal: process.env.USE_OLLAMA !== 'false', // Default to Ollama if not explicitly false
         });
 
         summaryParagraph = llmResponse.content.trim();
@@ -596,7 +596,7 @@ router.get('/category', async (req: Request, res: Response) => {
           ] as LLMMessage[],
           temperature: 0.7,
           max_tokens: 120, // ~90 words (under 100 words requirement)
-          useLocal: process.env.USE_OLLAMA === 'true',
+          useLocal: process.env.USE_OLLAMA !== 'false', // Default to Ollama if not explicitly false
         });
         
         summaryText = llmResponse.content.trim();
