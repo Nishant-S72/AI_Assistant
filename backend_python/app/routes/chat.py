@@ -18,7 +18,11 @@ router = APIRouter()
 
 
 class ChatRequest(BaseModel):
-    question: str
+    """Chat request - supports both old and new API formats."""
+    question: Optional[str] = None
+    userMessage: Optional[str] = None  # New API format
+    threadId: Optional[str] = None  # New API format
+    tone: Optional[Literal["formal", "warm", "crisp"]] = "warm"  # New API format
     conversationHistory: Optional[List[Dict[str, str]]] = None
     sessionId: Optional[str] = None
 
@@ -40,16 +44,34 @@ class ChatFeedbackRequest(BaseModel):
 
 @router.post("")
 async def chat(request: ChatRequest):
-    """Answer questions about inbox, policies, tasks, and create calendar events."""
+    """Answer questions about inbox, policies, tasks, and create calendar events.
+    
+    Supports both old API format ({question}) and new intent-based format ({userMessage}).
+    For new format, routes to RAG endpoint for now (intent-based routing to be implemented).
+    """
     try:
-        if not request.question or not isinstance(request.question, str):
-            raise HTTPException(status_code=400, detail="Question is required")
+        # Support both old and new API formats
+        user_message = request.userMessage or request.question
+        if not user_message or not isinstance(user_message, str):
+            raise HTTPException(status_code=400, detail="userMessage or question is required")
 
-        # Use agentic chat agent
+        # If using new API format (userMessage), route to RAG endpoint for now
+        # TODO: Implement full intent-based routing in Python backend
+        if request.userMessage:
+            # Use RAG endpoint logic (simplified - will be replaced with intent-based routing)
+            rag_request = RAGChatRequest(
+                threadId=request.threadId,
+                userMessage=request.userMessage,
+                tone=request.tone,
+                rag=True,
+            )
+            return await rag_chat(rag_request)
+        
+        # Old API format - use agentic chat agent
         try:
             agent_session_id = request.sessionId or f"agent_{__import__('time').time()}_{__import__('uuid').uuid4().hex[:9]}"
             result = await run_agentic_chat(
-                request.question,
+                user_message,
                 agent_session_id,
                 request.conversationHistory or [],
             )
@@ -244,10 +266,14 @@ Assistant:"""
                 for chunk in retrieved_chunks
             ]
             
+            # Return in new API format for compatibility with frontend
             return {
-                "reply": reply,
+                "kind": "policy",  # RAG endpoint always returns policy intent
+                "text": reply,
                 "citations": citations,
                 "suggestionId": suggestion_id,
+                "intent": "policy_intent",
+                "intent_confidence": 1.0,
                 "escalated": False,
             }
             
