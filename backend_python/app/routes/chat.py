@@ -216,8 +216,8 @@ Assistant:"""
                     
                     await conn.execute(
                         """
-                        INSERT INTO events (type, correlation_id, prompt_ref, retrieved_ids, raw_model_response, final_text, latency_ms)
-                        VALUES ($1, $2, $3, $4, $5, $6, $7)
+                        INSERT INTO events (type, correlation_id, prompt_ref, retrieved_ids, raw_model_response, final_text, latency_ms, payload)
+                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
                         """,
                         "rag_chat",
                         correlation_id,
@@ -226,6 +226,10 @@ Assistant:"""
                         reply,
                         reply,
                         latency_ms,
+                        json.dumps({
+                            "intent": "policy_intent",
+                            "user_message": request.userMessage[:200],
+                        }),
                     )
             except Exception as e:
                 print(f"[RAG] Failed to save to audit: {e}")
