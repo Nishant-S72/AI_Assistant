@@ -6,17 +6,25 @@ from app.db.connection import get_pool
 router = APIRouter()
 
 
-async def require_auth(authorization: Optional[str] = Header(None), token: Optional[str] = Query(None)):
-    """Auth middleware."""
+async def require_auth(
+    authorization: Optional[str] = Header(None, alias="x-demo-token"),
+    token: Optional[str] = Query(None)
+):
+    """Auth middleware - requires DEMO_SEED_TOKEN or ADMIN_API_KEY."""
     import os
+    
+    # Support both Header and Query token
+    auth_token = None
     if authorization:
+        # Remove "Bearer " prefix if present
         auth_token = authorization.replace("Bearer ", "") if authorization.startswith("Bearer ") else authorization
-    else:
+    elif token:
         auth_token = token
-    expected_token = os.getenv("DEMO_SEED_TOKEN") or os.getenv("ADMIN_API_KEY")
+    
+    expected_token = os.getenv("DEMO_SEED_TOKEN") or os.getenv("ADMIN_API_KEY") or "changeme"
 
-    if not expected_token or auth_token != expected_token:
-        raise HTTPException(status_code=401, detail="Unauthorized")
+    if not auth_token or auth_token != expected_token:
+        raise HTTPException(status_code=401, detail="Unauthorized. Provide x-demo-token header or token query param.")
 
     return auth_token
 

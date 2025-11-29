@@ -77,8 +77,21 @@ _json_store = JSONVectorStore()
 
 async def query_json_store(query_text: str, k: int = 3) -> List[VectorQueryResult]:
     """Query JSON vector store."""
+    # Check if store is empty
+    if len(_json_store.vectors) == 0:
+        print("[VectorStore] Warning: Vector store is empty. Policy documents may not be seeded.")
+        return []
+    
     # Get embedding for query
-    query_embedding = await get_embedding(query_text)
+    try:
+        query_embedding = await get_embedding(query_text)
+        
+        if not query_embedding or len(query_embedding) == 0:
+            print("[VectorStore] Warning: Empty embedding generated for query")
+            return []
+    except Exception as e:
+        print(f"[VectorStore] Error generating query embedding: {e}")
+        return []
     
     # Calculate similarities
     results = []
@@ -86,15 +99,25 @@ async def query_json_store(query_text: str, k: int = 3) -> List[VectorQueryResul
         if "embedding" not in vec_data:
             continue
         
-        score = _json_store.cosine_similarity(query_embedding, vec_data["embedding"])
-        results.append(VectorQueryResult(
-            id=vec_id,
-            text=vec_data.get("text", ""),
-            score=score,
-            metadata=vec_data.get("metadata", {})
-        ))
+        try:
+            score = _json_store.cosine_similarity(query_embedding, vec_data["embedding"])
+            results.append(VectorQueryResult(
+                id=vec_id,
+                text=vec_data.get("text", ""),
+                score=score,
+                metadata=vec_data.get("metadata", {})
+            ))
+        except Exception as e:
+            print(f"[VectorStore] Error calculating similarity for {vec_id}: {e}")
+            continue
     
     # Sort by score and return top k
     results.sort(key=lambda x: x.score, reverse=True)
-    return results[:k]
+    filtered_results = [r for r in results[:k] if r.score > 0.1]  # Filter very low scores
+    
+    if len(filtered_results) == 0 and len(results) > 0:
+        # Return top result even if score is low (might be relevant)
+        return results[:1]
+    
+    return filtered_results
 

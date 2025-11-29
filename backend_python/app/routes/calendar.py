@@ -239,6 +239,178 @@ async def create_event(request: CreateEventRequest):
 
 
 
+async def parse_event_text(text: str) -> Dict[str, Any]:
+    """
+    Parse natural language text to extract calendar event details.
+    Returns dict with 'event' (if successful) or 'missing_fields' and 'clarifying_question'.
+    This is a helper function that can be called from other routes.
+    """
+    if not text:
+        return {
+            "missing_fields": ["title", "start_time"],
+            "clarifying_question": "What would you like to schedule, and when?",
+        }
+    
+    now = datetime.now()
+    tomorrow = now + timedelta(days=1)
+    tomorrow_date_str = tomorrow.strftime("%Y-%m-%d")
+    
+    system_prompt = f"""You are a strict JSON parser. Extract calendar event details from natural language.
+
+CRITICAL RULES:
+1. Return ONLY valid JSON - no explanations, no markdown, no code blocks
+2. Start with {{ and end with }}
+3. Use double quotes for all strings
+4. Calculate dates relative to: {now.isoformat()}
+5. Tomorrow is: {tomorrow_date_str}
+
+JSON Schema:
+{{
+  "title": "string (required)",
+  "start_time": "ISO 8601 datetime (required)",
+  "end_time": "ISO 8601 datetime (required, default: 1 hour after start)",
+  "description": "string or null",
+  "is_recurring": "boolean",
+  "recurrence_pattern": "daily|weekly|monthly|yearly or null",
+  "recurrence_interval": "number (default 1)",
+  "location": "string or null",
+  "attendees": "array of strings or null"
+}}
+
+Examples (copy format exactly):
+"Meeting tomorrow at 2pm" → {{"title":"Meeting","start_time":"{tomorrow_date_str}T14:00:00","end_time":"{tomorrow_date_str}T15:00:00"}}
+"Standup every Monday 9am" → {{"title":"Standup","start_time":"2024-11-25T09:00:00","end_time":"2024-11-25T09:30:00","is_recurring":true,"recurrence_pattern":"weekly"}}
+
+Return ONLY the JSON object, nothing else."""
+
+    try:
+        llm_response = await generate_chat_completion(
+            LLMRequestOptions(
+                model=os.getenv("LLM_MODEL") or os.getenv("OPENAI_MODEL") or "tinyllama",
+                messages=[
+                    LLMMessage("system", system_prompt),
+                    LLMMessage("user", text),
+                ],
+                temperature=0.0,
+                max_tokens=150,
+                use_local=os.getenv("USE_OLLAMA") != "false",
+            )
+        )
+        
+        # Parse LLM response
+        event_data = None
+        try:
+            json_text = llm_response.content.strip()
+            json_text = re.sub(r"```json\s*", "", json_text).replace("```", "")
+            json_match = re.search(r"\{[\s\S]*\}", json_text)
+            if json_match:
+                event_data = json.loads(json_match.group(0))
+            else:
+                event_data = json.loads(json_text)
+        except Exception as parse_error:
+            print(f"[Calendar Parse] JSON parse error: {parse_error}")
+            # Enhanced fallback parser (same as below)
+            event_data = _fallback_parse_event(text)
+        
+        # Validate required fields
+        if not event_data or not event_data.get("title") or not event_data.get("start_time"):
+            missing = []
+            if not event_data or not event_data.get("title"):
+                missing.append("title")
+            if not event_data or not event_data.get("start_time"):
+                missing.append("start_time")
+            
+            return {
+                "missing_fields": missing,
+                "clarifying_question": f"What {' and '.join(missing)} would you like for this event?",
+            }
+        
+        # Set default end_time if missing
+        if not event_data.get("end_time"):
+            start = datetime.fromisoformat(event_data["start_time"].replace("Z", "+00:00"))
+            end = start + timedelta(hours=1)
+            event_data["end_time"] = end.isoformat()
+        
+        return {"event": event_data}
+    
+    except Exception as e:
+        print(f"[Calendar Parse] Error: {e}")
+        return {
+            "missing_fields": ["title", "start_time"],
+            "clarifying_question": "I'm having trouble parsing that. Could you provide the event title and time?",
+        }
+
+
+def _fallback_parse_event(text: str) -> Dict[str, Any]:
+    """Fallback parser using regex patterns."""
+    lower_text = text.lower()
+    title = "Meeting"
+    
+    # Extract title
+    title_patterns = [
+        r"(?:schedule|add|create|book|plan)\s+(?:a\s+)?(?:meeting|call|appointment|event|standup|sync|review|conference)\s+(?:called|titled|named)?\s*[\"']?([^\"']+)[\"']?",
+        r"(?:meeting|call|appointment|event|standup|sync|review|conference)\s+(?:called|titled|named)?\s*[\"']?([^\"']+?)(?:\s+tomorrow|\s+today|\s+at|\s+on|$)",
+    ]
+    
+    for pattern in title_patterns:
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match and match.group(1) and match.group(1).strip():
+            title = match.group(1).strip()
+            break
+    
+    if title == "Meeting":
+        if "standup" in lower_text:
+            title = "Team Standup"
+        elif "call" in lower_text:
+            title = "Call"
+        elif "appointment" in lower_text:
+            title = "Appointment"
+    
+    # Extract time
+    start_date = datetime.now()
+    hour = 14
+    minute = 0
+    
+    if "tomorrow" in lower_text:
+        start_date = datetime.now() + timedelta(days=1)
+    
+    time_match = re.search(r"(\d{1,2})(?::(\d{2}))?\s*(am|pm)?", text, re.IGNORECASE)
+    if time_match:
+        hour = int(time_match.group(1))
+        if time_match.group(3):
+            ampm = time_match.group(3).lower()
+            if ampm == "pm" and hour < 12:
+                hour += 12
+            elif ampm == "am" and hour == 12:
+                hour = 0
+        if time_match.group(2):
+            minute = int(time_match.group(2))
+    
+    start_date = start_date.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    end_date = start_date + timedelta(hours=1)
+    
+    # Check for recurring
+    is_recurring = "every" in lower_text or "weekly" in lower_text or "daily" in lower_text
+    recurrence_pattern = None
+    if is_recurring:
+        if "daily" in lower_text or "every day" in lower_text:
+            recurrence_pattern = "daily"
+        elif "weekly" in lower_text or "every week" in lower_text:
+            recurrence_pattern = "weekly"
+        elif "monthly" in lower_text:
+            recurrence_pattern = "monthly"
+        else:
+            recurrence_pattern = "weekly"
+    
+    return {
+        "title": title[:100],
+        "start_time": start_date.isoformat(),
+        "end_time": end_date.isoformat(),
+        "is_recurring": is_recurring,
+        "recurrence_pattern": recurrence_pattern,
+    }
+
+
 @router.post("/parse")
 async def parse_event(request: ParseEventRequest):
     """Parse natural language to create calendar event."""

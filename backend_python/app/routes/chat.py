@@ -1,4 +1,4 @@
-"""Chat routes."""
+"""Chat routes with intent-based routing and policy escalation."""
 from fastapi import APIRouter, HTTPException
 from typing import Optional, List, Dict, Any, Literal
 from pydantic import BaseModel
@@ -6,6 +6,7 @@ from app.agents.agentic_chat import run_agentic_chat
 from app.clients.vectorstore import query_vectorstore, VectorQueryResult
 from app.clients.llm import generate_chat_completion, LLMMessage, LLMRequestOptions
 from app.policy.policy_engine import check_policy
+from app.policy.intent_classifier import classify_intent_async, INTENT_RULES_CONFIDENCE_THRESHOLD
 from app.db.connection import get_pool
 from pathlib import Path
 import os
@@ -47,7 +48,7 @@ async def chat(request: ChatRequest):
     """Answer questions about inbox, policies, tasks, and create calendar events.
     
     Supports both old API format ({question}) and new intent-based format ({userMessage}).
-    For new format, routes to RAG endpoint for now (intent-based routing to be implemented).
+    Uses intent classification to route to appropriate handler.
     """
     try:
         # Support both old and new API formats
@@ -55,17 +56,86 @@ async def chat(request: ChatRequest):
         if not user_message or not isinstance(user_message, str):
             raise HTTPException(status_code=400, detail="userMessage or question is required")
 
-        # If using new API format (userMessage), route to RAG endpoint for now
-        # TODO: Implement full intent-based routing in Python backend
+        # If using new API format (userMessage), use intent-based routing
         if request.userMessage:
-            # Use RAG endpoint logic (simplified - will be replaced with intent-based routing)
-            rag_request = RAGChatRequest(
-                threadId=request.threadId,
-                userMessage=request.userMessage,
-                tone=request.tone,
-                rag=True,
-            )
-            return await rag_chat(rag_request)
+            # CRITICAL: Check policy escalation BEFORE intent classification
+            # This ensures sensitive content is escalated even if it matches policy/action patterns
+            policy_check = check_policy(request.userMessage)
+            if policy_check["action"] == "ESCALATE":
+                # Escalate immediately - do not process further
+                correlation_id = str(uuid.uuid4())
+                escalation_reasons = [r["reason"] for r in policy_check.get("reasons", [])]
+                
+                # Log escalation to audit
+                try:
+                    pool = await get_pool()
+                    async with pool.acquire() as conn:
+                        await conn.execute(
+                            """
+                            INSERT INTO events (type, correlation_id, raw_model_response, final_text, latency_ms, payload)
+                            VALUES ($1, $2, $3, $4, $5, $6)
+                            """,
+                            "chat_escalated",
+                            correlation_id,
+                            "ESCALATED",
+                            "This request requires human review due to sensitive content.",
+                            0,
+                            json.dumps({
+                                "user_message": request.userMessage[:200],
+                                "escalation_reasons": escalation_reasons,
+                                "escalated": True,
+                            }),
+                        )
+                except Exception as e:
+                    print(f"[Chat] Failed to log escalation: {e}")
+                
+                return {
+                    "kind": "policy",
+                    "text": f"This request requires human review due to sensitive content. I'm escalating this to a human reviewer. Reason: {', '.join(escalation_reasons[:2])}",
+                    "citations": [],
+                    "suggestionId": None,
+                    "intent": "policy_intent",  # Default intent for escalated messages
+                    "intent_confidence": 1.0,
+                    "escalated": True,
+                    "reasons": escalation_reasons
+                }
+            
+            # Classify intent (after escalation check passes)
+            intent_result = await classify_intent_async(request.userMessage)
+            intent = intent_result["intent"]
+            confidence = intent_result.get("confidence", 0.7)
+            intent_method = intent_result.get("method", "rules")
+            intent_reasons = intent_result.get("reasons", [])
+            
+            print(f"[Chat] Intent: {intent} (confidence: {confidence:.2f}, method: {intent_method})")
+            
+            # Check if confidence is below threshold (needs manual labeling)
+            needs_manual_label = confidence < INTENT_RULES_CONFIDENCE_THRESHOLD
+            
+            # Route based on intent
+            if intent == "policy_intent":
+                # Use RAG endpoint for policy questions
+                rag_request = RAGChatRequest(
+                    threadId=request.threadId,
+                    userMessage=request.userMessage,
+                    tone=request.tone,
+                    rag=True,
+                )
+                response = await rag_chat(rag_request)
+                # Add needs_manual_label if applicable
+                if needs_manual_label:
+                    response["needs_manual_label"] = True
+                return response
+            elif intent == "action_intent":
+                # Route to action handler
+                return await handle_action_intent(request.userMessage, request.threadId, request.tone, intent_result)
+            else:
+                # general_intent - use conversational assistant
+                response = await handle_general_intent(request.userMessage, request.threadId, request.tone)
+                # Add needs_manual_label if applicable
+                if needs_manual_label:
+                    response["needs_manual_label"] = True
+                return response
         
         # Old API format - use agentic chat agent
         try:
@@ -107,25 +177,38 @@ async def rag_chat(request: RAGChatRequest):
         correlation_id = str(uuid.uuid4())
         start_time = datetime.now()
         
-        # Check policy safety
-        policy_check = check_policy(request.userMessage)
-        if policy_check["action"] == "ESCALATE":
-            return {
-                "reply": "This request requires human review due to sensitive content. I'm escalating this to a human reviewer.",
-                "citations": [],
-                "suggestionId": None,
-                "escalated": True,
-                "reasons": [r["reason"] for r in policy_check.get("reasons", [])]
-            }
+        # Note: Policy escalation is now checked in main /api/chat route BEFORE routing here
+        # This RAG endpoint assumes escalation has already been handled
         
         # Retrieve policy chunks if RAG enabled
         retrieved_chunks: List[VectorQueryResult] = []
+        rag_error = None
+        
         if request.rag:
             try:
                 retrieved_chunks = await query_vectorstore(request.userMessage, k=3)
+                
+                # If no chunks returned, check if vectorstore is empty
+                if len(retrieved_chunks) == 0:
+                    rag_error = "no_chunks"
+                    print("[RAG] Warning: No chunks retrieved from vector store. Policy docs may not be seeded.")
             except Exception as e:
                 print(f"[RAG] Vector store query failed: {e}")
+                rag_error = "vectorstore_unavailable"
                 # Continue without RAG if vector store fails
+        
+        # If RAG failed and no chunks, return error response
+        if rag_error and len(retrieved_chunks) == 0:
+            return {
+                "kind": "policy",
+                "text": "Policy lookup is currently unavailable. The policy documents may not be seeded yet. Please run: python scripts/seed_policy_docs.py",
+                "citations": [],
+                "suggestionId": None,
+                "intent": "policy_intent",
+                "intent_confidence": 1.0,
+                "escalated": False,
+                "rag_error": rag_error,
+            }
         
         # Build prompt from template
         prompt_template_path = Path(__file__).parent.parent.parent.parent / "prompts" / "policy_chat_template.md"
@@ -251,6 +334,8 @@ Assistant:"""
                         json.dumps({
                             "intent": "policy_intent",
                             "user_message": request.userMessage[:200],
+                            "citations_count": len(retrieved_chunks),
+                            "retrieved_ids": [chunk.id for chunk in retrieved_chunks],
                         }),
                     )
             except Exception as e:
@@ -286,6 +371,223 @@ Assistant:"""
     except Exception as error:
         print(f"Error in RAG chat: {error}")
         raise HTTPException(status_code=500, detail=f"Failed to process RAG chat: {str(error)}")
+
+
+async def handle_action_intent(user_message: str, thread_id: Optional[str], tone: Optional[str], intent_result: Dict[str, Any]) -> Dict[str, Any]:
+    """Handle action intent - parse and create calendar events or tasks."""
+    from app.routes.calendar import parse_event_text
+    
+    correlation_id = str(uuid.uuid4())
+    start_time = datetime.now()
+    
+    try:
+        # Parse event from user message
+        parse_result = await parse_event_text(user_message)
+        
+        if parse_result.get("event"):
+            event_data = parse_result["event"]
+            
+            # Create event in database
+            pool = await get_pool()
+            async with pool.acquire() as conn:
+                # Insert into calendar_events table
+                event_row = await conn.fetchrow(
+                    """
+                    INSERT INTO calendar_events (
+                        title, description, start_time, end_time,
+                        is_recurring, recurrence_pattern, recurrence_interval,
+                        location, attendees, source, created_by
+                    )
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                    RETURNING id, title, start_time, end_time, is_recurring, recurrence_pattern
+                    """,
+                    event_data.get("title"),
+                    event_data.get("description"),
+                    event_data.get("start_time"),
+                    event_data.get("end_time"),
+                    event_data.get("is_recurring", False),
+                    event_data.get("recurrence_pattern"),
+                    event_data.get("recurrence_interval", 1),
+                    event_data.get("location"),
+                    json.dumps(event_data.get("attendees", [])),
+                    "simulated",
+                    "chat_assistant",
+                )
+            
+            event_id = str(event_row["id"])
+            
+            # Format event time
+            try:
+                event_start = datetime.fromisoformat(event_data["start_time"].replace("Z", "+00:00"))
+                event_time = event_start.strftime("%A, %B %d at %I:%M %p")
+            except:
+                event_time = event_data.get("start_time", "the scheduled time")
+            
+            # Create confirmation message
+            text = f'✅ I\'ve added "{event_data.get("title", "Event")}" to your calendar for {event_time}.'
+            if event_data.get("is_recurring"):
+                text += f' This is a {event_data.get("recurrence_pattern", "recurring")} recurring event.'
+            if event_data.get("location"):
+                text += f' Location: {event_data["location"]}.'
+            
+            # Log to audit
+            try:
+                pool = await get_pool()
+                async with pool.acquire() as conn:
+                    await conn.execute(
+                        """
+                        INSERT INTO events (type, correlation_id, raw_model_response, final_text, latency_ms, payload)
+                        VALUES ($1, $2, $3, $4, $5, $6)
+                        """,
+                        "action_calendar_created",
+                        correlation_id,
+                        text,
+                        text,
+                        int((datetime.now() - start_time).total_seconds() * 1000),
+                        json.dumps({
+                            "intent": "action_intent",
+                            "action_type": "calendar_event",
+                            "event_id": event_id,
+                            "user_message": user_message[:200],
+                        }),
+                    )
+            except Exception as e:
+                print(f"[Action] Failed to log to audit: {e}")
+            
+            return {
+                "kind": "action",
+                "text": text,
+                "citations": [],
+                "suggestionId": str(uuid.uuid4()),
+                "intent": "action_intent",
+                "intent_confidence": intent_result.get("confidence", 0.9),
+                "action_result": {
+                    "success": True,
+                    "eventId": event_id,
+                    "event": dict(event_row),
+                },
+                "escalated": False,
+            }
+        else:
+            # Missing required fields - ask clarifying question
+            missing_fields = parse_result.get("missing_fields", [])
+            clarifying_question = parse_result.get("clarifying_question", "What time would you like to schedule this?")
+            
+            return {
+                "kind": "action",
+                "text": clarifying_question,
+                "citations": [],
+                "suggestionId": str(uuid.uuid4()),
+                "intent": "action_intent",
+                "intent_confidence": intent_result.get("confidence", 0.9),
+                "action_suggestion": {
+                    "action_type": "calendar_event",
+                    "confirm_needed": True,
+                    "missing_fields": missing_fields,
+                },
+                "escalated": False,
+            }
+    
+    except Exception as e:
+        print(f"[Action] Error handling action intent: {e}")
+        import traceback
+        traceback.print_exc()
+        # Fallback to general response
+        return await handle_general_intent(user_message, thread_id, tone)
+
+
+async def handle_general_intent(user_message: str, thread_id: Optional[str], tone: Optional[str]) -> Dict[str, Any]:
+    """Handle general intent with conversational assistant (no RAG)."""
+    correlation_id = str(uuid.uuid4())
+    start_time = datetime.now()
+    
+    # Get inbox context (optional)
+    context = ""
+    try:
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            inbox_result = await conn.fetchrow("""
+                SELECT COUNT(*) as total, 
+                       COUNT(*) FILTER (WHERE read_at IS NULL) as unread
+                FROM messages
+            """)
+            if inbox_result:
+                context = f"Current inbox: {inbox_result['total']} messages ({inbox_result['unread']} unread)."
+    except Exception:
+        pass
+    
+    # Simple, direct system prompt - especially for greetings
+    user_lower = user_message.lower().strip()
+    is_greeting = user_lower in ['hi', 'hello', 'hey', 'greetings', 'good morning', 'good afternoon', 'good evening', 'howdy', "how's your day", "how are you"]
+    
+    # For simple greetings, use hardcoded response to avoid LLM issues
+    if is_greeting and len(user_message.split()) <= 3:
+        text = "Hi! I'm Soraya, your AI assistant. I can help you with questions about your inbox, tasks, policies, and more. What would you like to know?"
+    else:
+        # For other questions, use LLM with conversational prompt
+        if is_greeting:
+            # Very simple, direct prompt for greetings
+            system_prompt = "You are Soraya. The user greeted you. Greet them back warmly in 1-2 sentences. Just say hello and offer help."
+        else:
+            # For other questions, be conversational but direct
+            system_prompt = f"""You are Soraya, a helpful AI assistant.
+
+{context}
+
+Answer the user's question directly and helpfully. Keep it under 200 words. Be conversational and friendly."""
+        
+        # Call LLM with conversational settings
+        temperature = float(os.getenv("LLM_GENERAL_TEMP", "0.3"))
+        llm_response = await generate_chat_completion(
+            LLMRequestOptions(
+                model=os.getenv("LLM_MODEL", "tinyllama"),
+                messages=[
+                    LLMMessage("system", system_prompt),
+                    LLMMessage("user", user_message),
+                ],
+                max_tokens=200,
+                temperature=temperature,
+                use_local=os.getenv("USE_OLLAMA") != "false",
+                correlation_id=correlation_id,
+            )
+        )
+        
+        text = llm_response.content.strip()
+    
+    latency_ms = int((datetime.now() - start_time).total_seconds() * 1000)
+    suggestion_id = str(uuid.uuid4())
+    
+    # Save to audit
+    try:
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO events (type, correlation_id, raw_model_response, final_text, latency_ms, payload)
+                VALUES ($1, $2, $3, $4, $5, $6)
+                """,
+                "chat_general",
+                correlation_id,
+                text,
+                text,
+                latency_ms,
+                json.dumps({
+                    "intent": "general_intent",
+                    "user_message": user_message[:200],
+                }),
+            )
+    except Exception as e:
+        print(f"[Chat] Failed to save audit: {e}")
+    
+    return {
+        "kind": "assistant",
+        "text": text,
+        "citations": [],
+        "suggestionId": suggestion_id,
+        "intent": "general_intent",
+        "intent_confidence": 1.0,
+        "escalated": False,
+    }
 
 
 @router.post("/feedback")
@@ -325,4 +627,3 @@ async def chat_feedback(request: ChatFeedbackRequest):
     except Exception as error:
         print(f"Error saving feedback: {error}")
         raise HTTPException(status_code=500, detail=f"Failed to save feedback: {str(error)}")
-

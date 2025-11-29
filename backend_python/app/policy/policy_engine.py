@@ -13,7 +13,7 @@ DEFAULT_RULES = [
         "confidence": 0.9,
     },
     {
-        "keywords": ["lawsuit", "sue", "suing", "legal action", "attorney", "lawyer"],
+        "keywords": ["lawsuit", "sue", "suing", "legal action", "attorney", "lawyer", "litigation", "court", "legal complaint"],
         "action": "ESCALATE",
         "reason": "Contains legal action keywords",
         "confidence": 0.95,
@@ -31,13 +31,19 @@ DEFAULT_RULES = [
         "confidence": 0.9,
     },
     {
-        "keywords": ["ssn", "social security", "credit card number", "cvv"],
+        "keywords": ["ssn", "social security", "credit card number", "cvv", "passport", "visa", "bank account", "medical record", "diagnosis", "criminal record"],
         "action": "ESCALATE",
         "reason": "Contains sensitive personal information",
         "confidence": 1.0,
     },
     {
-        "keywords": ["termination", "fired", "dismissal", "layoff"],
+        "keywords": ["harassment", "sexual harassment", "discrimination", "grievance", "complaint against employee"],
+        "action": "ESCALATE",
+        "reason": "Contains HR/sensitive workplace keywords",
+        "confidence": 0.95,
+    },
+    {
+        "keywords": ["fire", "terminate", "termination", "fired", "dismissal", "dismiss", "layoff", "lay off", "misconduct", "employee misconduct"],
         "action": "ESCALATE",
         "reason": "Contains HR/termination keywords",
         "confidence": 0.95,
