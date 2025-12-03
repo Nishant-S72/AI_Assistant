@@ -136,7 +136,7 @@ Return JSON with:
     try:
         llm_response = await generate_chat_completion(
             LLMRequestOptions(
-                model=os.getenv("LLM_MODEL") or os.getenv("OPENAI_MODEL") or "tinyllama",
+                model=os.getenv("OPENAI_MODEL") or os.getenv("LLM_MODEL", "gpt-4o-mini"),
                 messages=[
                     LLMMessage("system", system_prompt),
                     LLMMessage("user", question),
@@ -237,7 +237,7 @@ async def run_agentic_chat(
         # Simple greeting response
         llm_response = await generate_chat_completion(
             LLMRequestOptions(
-                model=os.getenv("LLM_MODEL") or os.getenv("OPENAI_MODEL") or "tinyllama",
+                model=os.getenv("OPENAI_MODEL") or os.getenv("LLM_MODEL", "gpt-4o-mini"),
                 messages=[
                     LLMMessage(
                         "system",
@@ -322,7 +322,7 @@ async def run_agentic_chat(
     try:
         llm_response = await generate_chat_completion(
             LLMRequestOptions(
-                model=os.getenv("LLM_MODEL") or os.getenv("OPENAI_MODEL") or "tinyllama",
+                model=os.getenv("OPENAI_MODEL") or os.getenv("LLM_MODEL", "gpt-4o-mini"),
                 messages=messages,
                 temperature=0.5,
                 max_tokens=150,

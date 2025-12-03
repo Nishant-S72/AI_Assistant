@@ -30,18 +30,18 @@ async def health():
         health_status["database"] = "disconnected"
         health_status["status"] = "degraded"
 
-    # Check LLM availability (priority: Gemini -> Ollama -> OpenAI)
+    # Check LLM availability (priority: OpenAI -> Ollama -> Gemini)
     try:
-        if os.getenv("GEMINI_API_KEY"):
-            health_status["llm"] = (
-                "gemini_available" if await check_gemini_health() else "gemini_unavailable"
-            )
+        if os.getenv("OPENAI_API_KEY"):
+            health_status["llm"] = "openai_configured"
         elif os.getenv("USE_OLLAMA") != "false":
             health_status["llm"] = (
                 "ollama_available" if await check_ollama_health() else "ollama_unavailable"
             )
-        elif os.getenv("OPENAI_API_KEY"):
-            health_status["llm"] = "openai_configured"
+        elif os.getenv("GEMINI_API_KEY"):
+            health_status["llm"] = (
+                "gemini_available" if await check_gemini_health() else "gemini_unavailable"
+            )
         else:
             health_status["llm"] = "not_configured"
     except Exception:
@@ -85,6 +85,8 @@ async def health():
 async def health_vectorstore():
     """Vector store health check endpoint."""
     try:
+        # Always load fresh vectors
+        _json_store.load(force=True)
         chunk_count = len(_json_store.vectors)
         
         # Get metadata

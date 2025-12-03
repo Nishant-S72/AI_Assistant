@@ -1,5 +1,5 @@
 """Summary routes."""
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, BackgroundTasks
 from typing import Dict, Any, List
 from datetime import datetime
 from app.db.connection import get_pool
@@ -7,16 +7,77 @@ from app.clients.llm import generate_chat_completion, LLMMessage, LLMRequestOpti
 from app.lib.priority import compute_priority
 import json
 import os
+import asyncio
 
 router = APIRouter()
 
 # Simple in-memory cache
-_summary_cache = {}
+_summary_cache = None
 _summary_cache_timestamp = None
+_summary_cache_data = {}  # Cache for full summary data
+
+
+async def _generate_summary_async(totals: Dict, tasks_by_priority: Dict, counts: Dict, top_leads: List, urgent_context: Dict):
+    """Generate AI summary in the background."""
+    global _summary_cache, _summary_cache_timestamp
+    
+    try:
+        top_p0_tasks = ", ".join(
+            [f"{t.get('contact_name', 'Contact')}: {t.get('title', '')}" for t in tasks_by_priority["P0"][:3]]
+        )
+        top_leads_list = ", ".join(
+            [f"{l['name']}{' from ' + l['company'] if l.get('company') else ''}" for l in top_leads[:3]]
+        )
+
+        urgent_msg = ""
+        if urgent_context:
+            msg_body = urgent_context.get("messageBody", "")
+            if msg_body:
+                urgent_msg = f'Most urgent: {urgent_context["contactName"]} has {urgent_context["taskTitle"]}. Their message: "{msg_body[:200]}"'
+            else:
+                urgent_msg = f'Most urgent: {urgent_context["contactName"]} has {urgent_context["taskTitle"]}.'
+        
+        summary_prompt = f"""Here's what's in the inbox right now:
+
+{totals['totalMessages']} total messages, {totals['unread']} unread. {totals['leads']} potential leads, {totals['complaints']} complaints flagged.
+
+{counts['P0']} urgent tasks (P0) need immediate attention{' - including: ' + top_p0_tasks if top_p0_tasks else ''}. {counts['P1']} high-priority tasks (P1) due soon. {counts['P2']} normal tasks.
+
+{urgent_msg}
+
+{'Top leads: ' + top_leads_list + '.' if top_leads else ''}
+
+Give me a concise summary of what's happening. Be specific about who needs attention and why. Keep it brief - under 250 words."""
+
+        llm_response = await generate_chat_completion(
+            LLMRequestOptions(
+                model=os.getenv("OPENAI_MODEL") or os.getenv("LLM_MODEL", "gpt-4o-mini"),
+                messages=[
+                    LLMMessage(
+                        "system",
+                        "You're briefing someone about their inbox. Be natural, specific, and concise. Mention actual people and situations. No generic statements. Keep it under 250 words - be direct and brief.",
+                    ),
+                    LLMMessage("user", summary_prompt),
+                ],
+                temperature=0.7,
+                max_tokens=200,
+                use_local=False,
+            )
+        )
+
+        summary_paragraph = llm_response.content.strip()
+        
+        # Cache for 1 minute
+        _summary_cache = summary_paragraph
+        _summary_cache_timestamp = datetime.now().timestamp() * 1000
+        
+        print(f"[Summary] AI summary generated and cached")
+    except Exception as error:
+        print(f"[Summary] Failed to generate LLM summary: {error}")
 
 
 @router.get("")
-async def get_summary():
+async def get_summary(background_tasks: BackgroundTasks):
     """Get inbox summary with totals, tasks, and LLM-generated summary."""
     start_time = datetime.now().timestamp() * 1000
 
@@ -36,6 +97,8 @@ async def get_summary():
             "unread": 0,
             "leads": 0,
             "complaints": 0,
+            "urgent": 0,
+            "highPriority": 0,
         }
 
         tasks: List[Dict] = []
@@ -55,23 +118,59 @@ async def get_summary():
                 totals["totalMessages"] = int(msg_row["total"]) if msg_row else 0
                 totals["unread"] = int(msg_row["unread"]) if msg_row else 0
 
-                # Get leads count
+                # Get leads count - infer from contact tags (new-lead, potential-interest)
+                # Tags is JSONB, so use JSONB containment operator @>
                 leads_row = await conn.fetchrow(
-                    "SELECT COUNT(*) as count FROM contacts WHERE tags::text LIKE '%lead%'"
+                    """
+                    SELECT COUNT(*) as count 
+                    FROM contacts 
+                    WHERE tags IS NOT NULL
+                      AND (
+                        tags @> '"new-lead"'::jsonb
+                        OR tags @> '"potential-interest"'::jsonb
+                      )
+                    """
                 )
                 totals["leads"] = int(leads_row["count"]) if leads_row else 0
 
-                # Get complaints count
+                # Get complaints count - infer from contact tags (escalation) or message content
                 complaints_row = await conn.fetchrow(
                     """
-                    SELECT COUNT(DISTINCT thread_id) as count
-                    FROM messages
-                    WHERE LOWER(body) LIKE '%complaint%' 
-                       OR LOWER(body) LIKE '%delay%'
-                       OR LOWER(body) LIKE '%late%'
+                    SELECT COUNT(DISTINCT COALESCE(c.id, m.contact_id)) as count
+                    FROM messages m
+                    LEFT JOIN contacts c ON m.contact_id = c.id
+                    WHERE (c.tags IS NOT NULL AND c.tags @> '"escalation"'::jsonb)
+                       OR (LOWER(m.body) LIKE '%complaint%' 
+                           OR LOWER(m.body) LIKE '%refund%'
+                           OR LOWER(m.body) LIKE '%dissatisfied%'
+                           OR LOWER(m.body) LIKE '%unacceptable%'
+                           OR LOWER(m.body) LIKE '%cancel%'
+                           OR LOWER(m.body) LIKE '%speak to manager%')
                     """
                 )
                 totals["complaints"] = int(complaints_row["count"]) if complaints_row else 0
+                
+                # Get urgent count - infer from contact tags (urgent-action-required)
+                urgent_row = await conn.fetchrow(
+                    """
+                    SELECT COUNT(DISTINCT c.id) as count
+                    FROM contacts c
+                    WHERE c.tags IS NOT NULL
+                      AND c.tags @> '"urgent-action-required"'::jsonb
+                    """
+                )
+                totals["urgent"] = int(urgent_row["count"]) if urgent_row else 0
+                
+                # Get high priority count - infer from contact tags (high-priority)
+                high_priority_row = await conn.fetchrow(
+                    """
+                    SELECT COUNT(DISTINCT c.id) as count
+                    FROM contacts c
+                    WHERE c.tags IS NOT NULL
+                      AND c.tags @> '"high-priority"'::jsonb
+                    """
+                )
+                totals["highPriority"] = int(high_priority_row["count"]) if high_priority_row else 0
 
                 # Get tasks
                 task_rows = await conn.fetch(
@@ -82,9 +181,15 @@ async def get_summary():
                         c.email as contact_email,
                         c.tags as contact_tags,
                         c.company as contact_company,
-                        (SELECT body FROM messages m WHERE m.contact_id = t.contact_id ORDER BY m.created_at DESC LIMIT 1) as latest_message_body,
-                        (SELECT id FROM messages m WHERE m.contact_id = t.contact_id ORDER BY m.created_at DESC LIMIT 1) as latest_message_id,
-                        (SELECT thread_id FROM messages m WHERE m.contact_id = t.contact_id ORDER BY m.created_at DESC LIMIT 1) as thread_id
+                        COALESCE(
+                            t.thread_id,
+                            (SELECT thread_id FROM messages m WHERE m.contact_id = t.contact_id ORDER BY m.created_at DESC LIMIT 1)
+                        ) as thread_id,
+                        COALESCE(
+                            t.message_id,
+                            (SELECT id FROM messages m WHERE m.contact_id = t.contact_id ORDER BY m.created_at DESC LIMIT 1)
+                        ) as message_id,
+                        (SELECT body FROM messages m WHERE m.contact_id = t.contact_id ORDER BY m.created_at DESC LIMIT 1) as latest_message_body
                     FROM tasks t
                     LEFT JOIN contacts c ON t.contact_id = c.id
                     WHERE t.status = 'pending'
@@ -125,7 +230,7 @@ async def get_summary():
                     task["priority"] = priority
                     tasks.append(task)
 
-                # Get top leads
+                # Get top leads - infer from contact tags (new-lead, potential-interest)
                 lead_rows = await conn.fetch(
                     """
                     SELECT 
@@ -136,7 +241,11 @@ async def get_summary():
                         c.tags,
                         (SELECT COUNT(*) FROM messages m WHERE m.contact_id = c.id) as message_count
                     FROM contacts c
-                    WHERE c.tags::text LIKE '%lead%'
+                    WHERE c.tags IS NOT NULL
+                      AND (
+                        c.tags @> '"new-lead"'::jsonb
+                        OR c.tags @> '"potential-interest"'::jsonb
+                      )
                     ORDER BY c.created_at DESC
                     LIMIT 6
                     """
@@ -230,108 +339,44 @@ async def get_summary():
             else None
         )
 
-        # Generate LLM summary
-        summary_paragraph = ""
+        # Check cache for AI summary
+        global _summary_cache, _summary_cache_timestamp, _summary_cache_data
+        summary_paragraph = None
         summary_generating = False
-
-        # Check cache
-        global _summary_cache, _summary_cache_timestamp
+        
         if _summary_cache and _summary_cache_timestamp:
             cache_age = (datetime.now().timestamp() * 1000) - _summary_cache_timestamp
             if cache_age < 60000:  # 1 minute cache
                 summary_paragraph = _summary_cache
                 summary_generating = False
-
-        # Generate if not cached
-        if not summary_paragraph:
-            try:
-                top_p0_tasks = ", ".join(
-                    [f"{t.get('contact_name', 'Contact')}: {t.get('title', '')}" for t in tasks_by_priority["P0"][:3]]
+            else:
+                # Cache expired, generate new one in background
+                summary_paragraph = None  # Clear old cache
+                summary_generating = True
+                background_tasks.add_task(
+                    _generate_summary_async,
+                    totals,
+                    tasks_by_priority,
+                    counts,
+                    top_leads,
+                    urgent_context
                 )
-                top_leads_list = ", ".join(
-                    [f"{l['name']}{' from ' + l['company'] if l.get('company') else ''}" for l in top_leads[:3]]
-                )
+        else:
+            # No cache, generate in background
+            summary_paragraph = None
+            summary_generating = True
+            background_tasks.add_task(
+                _generate_summary_async,
+                totals,
+                tasks_by_priority,
+                counts,
+                top_leads,
+                urgent_context
+            )
 
-                urgent_msg = ""
-                if urgent_context:
-                    msg_body = urgent_context.get("messageBody", "")
-                    if msg_body:
-                        urgent_msg = f'Most urgent: {urgent_context["contactName"]} has {urgent_context["taskTitle"]}. Their message: "{msg_body[:200]}"'
-                    else:
-                        urgent_msg = f'Most urgent: {urgent_context["contactName"]} has {urgent_context["taskTitle"]}.'
-                
-                summary_prompt = f"""Here's what's in the inbox right now:
-
-{totals['totalMessages']} total messages, {totals['unread']} unread. {totals['leads']} potential leads, {totals['complaints']} complaints flagged.
-
-{counts['P0']} urgent tasks (P0) need immediate attention{' - including: ' + top_p0_tasks if top_p0_tasks else ''}. {counts['P1']} high-priority tasks (P1) due soon. {counts['P2']} normal tasks.
-
-{urgent_msg}
-
-{'Top leads: ' + top_leads_list + '.' if top_leads else ''}
-
-Give me a concise summary of what's happening. Be specific about who needs attention and why. Keep it brief - under 250 words."""
-
-                llm_response = await generate_chat_completion(
-                    LLMRequestOptions(
-                        model=os.getenv("LLM_MODEL") or os.getenv("OPENAI_MODEL") or "tinyllama",
-                        messages=[
-                            LLMMessage(
-                                "system",
-                                "You're briefing someone about their inbox. Be natural, specific, and concise. Mention actual people and situations. No generic statements. Keep it under 250 words - be direct and brief.",
-                            ),
-                            LLMMessage("user", summary_prompt),
-                        ],
-                        temperature=0.7,
-                        max_tokens=200,
-                        use_local=os.getenv("USE_OLLAMA") != "false",
-                    )
-                )
-
-                summary_paragraph = llm_response.content.strip()
-                summary_generating = False
-
-                # Cache for 1 minute
-                _summary_cache = summary_paragraph
-                _summary_cache_timestamp = datetime.now().timestamp() * 1000
-            except Exception as error:
-                print(f"[Summary] Failed to generate LLM summary: {error}")
-                summary_paragraph = ""
-                summary_generating = False
-
-        # Generate category summaries using LLM
+        # Category summaries - skip for now to keep response fast
+        # These can be generated on-demand when user clicks a category badge
         category_summaries = {}
-        for priority in ["P0", "P1", "P2"]:
-            priority_tasks = tasks_by_priority.get(priority, [])
-            if priority_tasks:
-                try:
-                    task_list = "\n".join(
-                        [
-                            f"- {t.get('contact_name', 'Contact')}: {t.get('title', '')}"
-                            for t in priority_tasks[:5]
-                        ]
-                    )
-                    context_prompt = f"""Tasks in {priority} priority:
-{task_list}
-
-Summarize what needs attention in this priority level. Be specific and concise. Under 100 words."""
-
-                    llm_response = await generate_chat_completion(
-                        LLMRequestOptions(
-                            model=os.getenv("LLM_MODEL") or os.getenv("OPENAI_MODEL") or "tinyllama",
-                            messages=[
-                                LLMMessage("system", "Summarize task priorities concisely."),
-                                LLMMessage("user", context_prompt),
-                            ],
-                            temperature=0.7,
-                            max_tokens=120,
-                            use_local=os.getenv("USE_OLLAMA") != "false",
-                        )
-                    )
-
-                    category_summaries[priority] = llm_response.content.strip()
-                except Exception:
-                    category_summaries[priority] = f"{len(priority_tasks)} {priority} priority tasks need attention."
 
         response_time = (datetime.now().timestamp() * 1000) - start_time
 
@@ -353,4 +398,166 @@ Summarize what needs attention in this priority level. Be specific and concise. 
     except Exception as error:
         print(f"Error generating summary: {error}")
         raise HTTPException(status_code=500, detail=f"Failed to generate summary: {str(error)}")
+
+
+@router.get("/category")
+async def get_category_summary(type: str = "urgent"):
+    """Generate a category-specific summary (urgent, high, unread, complaints, leads)."""
+    try:
+        pool = await get_pool()
+        
+        # Map category types to database queries
+        category_data = {
+            "urgent": {
+                "title": "Urgent Items",
+                "query": """
+                    SELECT DISTINCT
+                        c.name as contact_name,
+                        c.email,
+                        c.company,
+                        t.title as task_title,
+                        t.due_at,
+                        m.body as message_body,
+                        m.created_at as message_date
+                    FROM contacts c
+                    LEFT JOIN tasks t ON t.contact_id = c.id AND t.status = 'pending'
+                    LEFT JOIN messages m ON m.contact_id = c.id
+                    WHERE c.tags IS NOT NULL
+                      AND c.tags @> '"urgent-action-required"'::jsonb
+                    ORDER BY t.due_at ASC NULLS LAST, m.created_at DESC
+                    LIMIT 10
+                """,
+            },
+            "high": {
+                "title": "High Priority Items",
+                "query": """
+                    SELECT DISTINCT
+                        c.name as contact_name,
+                        c.email,
+                        c.company,
+                        t.title as task_title,
+                        t.due_at,
+                        m.body as message_body,
+                        m.created_at as message_date
+                    FROM contacts c
+                    LEFT JOIN tasks t ON t.contact_id = c.id AND t.status = 'pending'
+                    LEFT JOIN messages m ON m.contact_id = c.id
+                    WHERE c.tags IS NOT NULL
+                      AND c.tags @> '"high-priority"'::jsonb
+                    ORDER BY t.due_at ASC NULLS LAST, m.created_at DESC
+                    LIMIT 10
+                """,
+            },
+            "unread": {
+                "title": "Unread Messages",
+                "query": """
+                    SELECT 
+                        c.name as contact_name,
+                        c.email,
+                        c.company,
+                        m.body as message_body,
+                        m.created_at as message_date,
+                        m.thread_id
+                    FROM messages m
+                    LEFT JOIN contacts c ON m.contact_id = c.id
+                    WHERE m.processed = false
+                    ORDER BY m.created_at DESC
+                    LIMIT 10
+                """,
+            },
+            "complaints": {
+                "title": "Complaints & Escalations",
+                "query": """
+                    SELECT 
+                        c.name as contact_name,
+                        c.email,
+                        c.company,
+                        m.body as message_body,
+                        m.created_at as message_date,
+                        m.thread_id
+                    FROM messages m
+                    LEFT JOIN contacts c ON m.contact_id = c.id
+                    WHERE (c.tags IS NOT NULL AND c.tags @> '"escalation"'::jsonb)
+                       OR (LOWER(m.body) LIKE '%complaint%' 
+                           OR LOWER(m.body) LIKE '%refund%'
+                           OR LOWER(m.body) LIKE '%dissatisfied%'
+                           OR LOWER(m.body) LIKE '%unacceptable%'
+                           OR LOWER(m.body) LIKE '%cancel%'
+                           OR LOWER(m.body) LIKE '%speak to manager%')
+                    ORDER BY m.created_at DESC
+                    LIMIT 10
+                """,
+            },
+            "leads": {
+                "title": "Potential Leads",
+                "query": """
+                    SELECT 
+                        c.name as contact_name,
+                        c.email,
+                        c.company,
+                        m.body as message_body,
+                        m.created_at as message_date,
+                        (SELECT COUNT(*) FROM messages m2 WHERE m2.contact_id = c.id) as message_count
+                    FROM contacts c
+                    LEFT JOIN messages m ON m.contact_id = c.id
+                    WHERE c.tags IS NOT NULL
+                      AND (c.tags @> '"new-lead"'::jsonb OR c.tags @> '"potential-interest"'::jsonb)
+                    ORDER BY c.created_at DESC, m.created_at DESC
+                    LIMIT 10
+                """,
+            },
+        }
+        
+        if type not in category_data:
+            raise HTTPException(status_code=400, detail=f"Invalid category type: {type}. Must be one of: urgent, high, unread, complaints, leads")
+        
+        category_info = category_data[type]
+        items = []
+        
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(category_info["query"])
+            for row in rows:
+                items.append(dict(row))
+        
+        if not items:
+            return {
+                "summary": f"No {category_info['title'].lower()} found at the moment.",
+                "category": type,
+            }
+        
+        # Build context for LLM
+        items_text = "\n".join([
+            f"- {item.get('contact_name', 'Unknown')} ({item.get('email', 'N/A')}): {item.get('message_body', item.get('task_title', 'N/A'))[:200]}"
+            for item in items[:5]
+        ])
+        
+        prompt = f"""Here's a list of {category_info['title'].lower()}:
+
+{items_text}
+
+Provide a concise summary (under 150 words) of what needs attention in this category. Be specific about who needs help and why. Focus on actionable insights."""
+        
+        llm_response = await generate_chat_completion(
+            LLMRequestOptions(
+                model=os.getenv("OPENAI_MODEL") or os.getenv("LLM_MODEL", "gpt-4o-mini"),
+                messages=[
+                    LLMMessage(
+                        "system",
+                        "You're summarizing a specific category of inbox items. Be concise, specific, and actionable. Mention actual people and situations. Keep it under 150 words.",
+                    ),
+                    LLMMessage("user", prompt),
+                ],
+                temperature=0.7,
+                max_tokens=200,
+                use_local=False,  # Ensure OpenAI is used, not Ollama
+            )
+        )
+        
+        return {
+            "summary": llm_response.content.strip(),
+            "category": type,
+        }
+    except Exception as error:
+        print(f"Error generating category summary: {error}")
+        raise HTTPException(status_code=500, detail=f"Failed to generate category summary: {str(error)}")
 

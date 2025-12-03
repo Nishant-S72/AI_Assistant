@@ -11,6 +11,8 @@ import uuid
 class CreateTaskRequest(BaseModel):
     """Request model for creating a task."""
     contact_id: Optional[str] = None
+    thread_id: Optional[str] = None
+    message_id: Optional[str] = None
     title: str
     due_at: Optional[str] = None
     status: str = "pending"
@@ -30,9 +32,15 @@ async def list_tasks(status: Optional[str] = Query(None)):
                 c.email as contact_email,
                 c.tags as contact_tags,
                 c.company as contact_company,
-                (SELECT body FROM messages m WHERE m.contact_id = t.contact_id ORDER BY m.created_at DESC LIMIT 1) as latest_message_body,
-                (SELECT id FROM messages m WHERE m.contact_id = t.contact_id ORDER BY m.created_at DESC LIMIT 1) as latest_message_id,
-                (SELECT thread_id FROM messages m WHERE m.contact_id = t.contact_id ORDER BY m.created_at DESC LIMIT 1) as thread_id
+                COALESCE(
+                    t.thread_id,
+                    (SELECT thread_id FROM messages m WHERE m.contact_id = t.contact_id ORDER BY m.created_at DESC LIMIT 1)
+                ) as thread_id,
+                COALESCE(
+                    t.message_id,
+                    (SELECT id FROM messages m WHERE m.contact_id = t.contact_id ORDER BY m.created_at DESC LIMIT 1)
+                ) as message_id,
+                (SELECT body FROM messages m WHERE m.contact_id = t.contact_id ORDER BY m.created_at DESC LIMIT 1) as latest_message_body
             FROM tasks t
             LEFT JOIN contacts c ON t.contact_id = c.id
         """
@@ -96,17 +104,43 @@ async def create_task(request: CreateTaskRequest):
     try:
         pool = await get_pool()
         async with pool.acquire() as conn:
-            row = await conn.fetchrow(
-                """
-                INSERT INTO tasks (contact_id, title, due_at, status)
-                VALUES ($1, $2, $3, $4)
-                RETURNING *
-                """,
-                request.contact_id,
-                request.title,
-                request.due_at,
-                request.status,
-            )
+            # Check if thread_id and message_id columns exist
+            columns_info = await conn.fetch("""
+                SELECT column_name 
+                FROM information_schema.columns 
+                WHERE table_name = 'tasks' 
+                AND column_name IN ('thread_id', 'message_id')
+            """)
+            existing_columns = {row['column_name'] for row in columns_info}
+            
+            # Build INSERT query based on available columns
+            if 'thread_id' in existing_columns and 'message_id' in existing_columns:
+                row = await conn.fetchrow(
+                    """
+                    INSERT INTO tasks (contact_id, thread_id, message_id, title, due_at, status)
+                    VALUES ($1, $2, $3, $4, $5, $6)
+                    RETURNING *
+                    """,
+                    request.contact_id,
+                    request.thread_id,
+                    request.message_id,
+                    request.title,
+                    request.due_at,
+                    request.status,
+                )
+            else:
+                # Fallback for tables without thread_id/message_id columns
+                row = await conn.fetchrow(
+                    """
+                    INSERT INTO tasks (contact_id, title, due_at, status)
+                    VALUES ($1, $2, $3, $4)
+                    RETURNING *
+                    """,
+                    request.contact_id,
+                    request.title,
+                    request.due_at,
+                    request.status,
+                )
 
             # Log event
             await conn.execute(
@@ -117,6 +151,8 @@ async def create_task(request: CreateTaskRequest):
                 json.dumps({
                     "taskId": str(row["id"]),
                     "contactId": request.contact_id,
+                    "threadId": request.thread_id,
+                    "messageId": request.message_id,
                     "title": request.title,
                 }),
             )

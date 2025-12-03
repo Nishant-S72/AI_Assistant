@@ -106,11 +106,47 @@ def _load_rules() -> None:
 
 
 def check_policy(message_body: str) -> Dict[str, Any]:
-    """Check message against policy rules."""
+    """Check message against policy rules.
+    
+    NOTE: This is an onboard RAG bot with NO human backup.
+    Policy questions (asking ABOUT policies) should ALWAYS be allowed and answered via RAG.
+    This function is kept for compatibility but should not escalate policy questions.
+    """
     if not _rules:
         _load_rules()
 
     lower_body = message_body.lower()
+    
+    # Check if this is a policy question (asking ABOUT policy, not requesting action)
+    # Policy questions should be allowed through to policy_intent handler
+    # IMPORTANT: This is an onboard RAG bot - policy questions should NOT be escalated
+    policy_question_patterns = [
+        r'what (is|are) (our|the) (refund|return|policy|policies)',
+        r'what does (the|our) (policy|policies) (say|state|say about)',
+        r'according to (the|our) (policy|policies)',
+        r'check (the|our) (policy|policies)',
+        r'(policy|policies) (document|documents)',
+        r'what (is|are) (the|our) (rule|rules|guideline|guidelines)',
+        r'can (you|we) (check|see|look at) (the|our) (policy|policies)',
+        r'tell me (about|more about) (the|our|a) (refund|return|policy|policies|rule|rules)',
+        r'explain (the|our|a) (refund|return|policy|policies|rule|rules)',
+        r'describe (the|our|a) (refund|return|policy|policies|rule|rules)',
+        r'information (about|on) (the|our|a) (refund|return|policy|policies)',
+        r'(refund|return|policy|policies|rule|rules) (information|details|explanation)',
+        r'how (does|do) (the|our) (refund|return|policy|policies) (work|apply)',
+    ]
+    
+    import re
+    is_policy_question = any(re.search(pattern, lower_body, re.IGNORECASE) for pattern in policy_question_patterns)
+    
+    # If it's a policy question, allow it through (don't escalate)
+    if is_policy_question:
+        return {
+            "action": "ALLOW",
+            "reasons": [],
+            "confidence": 0.0,
+        }
+
     reasons = []
     max_confidence = 0.0
 

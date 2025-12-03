@@ -66,35 +66,49 @@ export default function SettingsPage() {
             </h2>
             <div className="space-y-2 text-sm">
               <div className="flex justify-between">
-                <span className="text-gray-600 dark:text-gray-400">Ollama Status:</span>
+                <span className="text-gray-600 dark:text-gray-400">Status:</span>
                 <span
                   className={`font-medium ${
-                    health.ollama_status === 'running'
+                    health.status === 'ok'
+                      ? 'text-green-600 dark:text-green-400'
+                      : 'text-yellow-600 dark:text-yellow-400'
+                  }`}
+                >
+                  {health.status || 'Unknown'}
+                </span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-gray-600 dark:text-gray-400">LLM Provider:</span>
+                <span
+                  className={`font-medium ${
+                    health.llm === 'openai_configured'
+                      ? 'text-green-600 dark:text-green-400'
+                      : 'text-yellow-600 dark:text-yellow-400'
+                  }`}
+                >
+                  {health.llm === 'openai_configured' ? 'OpenAI' : health.llm || 'Not configured'}
+                </span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-gray-600 dark:text-gray-400">Database:</span>
+                <span
+                  className={`font-medium ${
+                    health.database === 'connected'
                       ? 'text-green-600 dark:text-green-400'
                       : 'text-red-600 dark:text-red-400'
                   }`}
                 >
-                  {health.ollama_status}
+                  {health.database || 'Unknown'}
                 </span>
               </div>
-              <div className="flex justify-between">
-                <span className="text-gray-600 dark:text-gray-400">Available Models:</span>
-                <span className="text-gray-900 dark:text-white">
-                  {health.models.length > 0 ? health.models.join(', ') : 'None'}
-                </span>
-              </div>
-              <div className="flex justify-between">
-                <span className="text-gray-600 dark:text-gray-400">Dummy Threads:</span>
-                <span className="text-gray-900 dark:text-white">
-                  {health.dummy_threads_loaded}
-                </span>
-              </div>
-              <div className="flex justify-between">
-                <span className="text-gray-600 dark:text-gray-400">Mode:</span>
-                <span className="text-gray-900 dark:text-white capitalize">
-                  {health.mode}
-                </span>
-              </div>
+              {health.vectorstore && (
+                <div className="flex justify-between">
+                  <span className="text-gray-600 dark:text-gray-400">Vector Store:</span>
+                  <span className="text-gray-900 dark:text-white">
+                    {health.vectorstore.status} ({health.vectorstore.count_chunks || 0} chunks)
+                  </span>
+                </div>
+              )}
             </div>
           </div>
         )}

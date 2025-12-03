@@ -1,29 +1,18 @@
-"""Google Gemini LLM adapter with async and timeout support."""
+"""Google Gemini LLM adapter with async httpx for direct API calls."""
 import os
 import asyncio
+import json
 from typing import Optional
-from concurrent.futures import ThreadPoolExecutor
+import httpx
 from .openai_adapter import LLMMessage, LLMOptions, LLMResponse
-
-# Thread pool for running synchronous Gemini calls
-_executor = ThreadPoolExecutor(max_workers=4)
 
 
 async def generate_with_gemini(options: LLMOptions) -> LLMResponse:
-    """Generate completion using Google Gemini API with async and timeout.
+    """Generate completion using Google Gemini API with direct httpx calls.
     
+    Uses direct HTTP calls instead of SDK to avoid hanging issues.
     Reference: https://ai.google.dev/gemini-api/docs/quickstart
-    
-    Note: The google-genai client is synchronous, so we run it in a thread pool
-    to avoid blocking the event loop, with a timeout to prevent hanging.
     """
-    try:
-        from google import genai
-    except ImportError:
-        raise ImportError(
-            "google-genai package not installed. Install with: pip install -q -U google-genai"
-        )
-    
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
         raise ValueError("GEMINI_API_KEY not configured")
@@ -41,11 +30,8 @@ async def generate_with_gemini(options: LLMOptions) -> LLMResponse:
             # Skip assistant messages for now
             pass
     
-    # Combine system prompt with user message (optimize length)
+    # Combine system prompt with user message
     if system_prompt and user_messages:
-        # Truncate system prompt if too long (keep last 2000 chars for speed)
-        if len(system_prompt) > 2000:
-            system_prompt = system_prompt[-2000:]
         prompt = f"{system_prompt}\n\n{user_messages[0]}"
         if len(user_messages) > 1:
             prompt += "\n\n" + "\n\n".join(user_messages[1:])
@@ -57,100 +43,120 @@ async def generate_with_gemini(options: LLMOptions) -> LLMResponse:
     if not prompt:
         raise ValueError("No user message found in options.messages")
     
-    # Truncate prompt if too long (Gemini has limits, and shorter = faster)
-    max_prompt_length = int(os.getenv("GEMINI_MAX_PROMPT_LENGTH", "8000"))
-    if len(prompt) > max_prompt_length:
-        print(f"[Gemini] Warning: Truncating prompt from {len(prompt)} to {max_prompt_length} chars")
-        prompt = prompt[-max_prompt_length:]
-    
     # Get model name (default to gemini-2.5-flash - fastest model)
     model_name = options.model or os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
     
-    # Get timeout (default 30 seconds, configurable)
-    timeout_seconds = float(os.getenv("GEMINI_TIMEOUT", "30.0"))
+    # No timeout - let it run as long as needed
+    # Use async httpx directly (much faster than SDK)
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent"
+    params = {"key": api_key}
     
-    # Run synchronous Gemini call in thread pool with timeout
-    def _call_gemini():
-        """Synchronous Gemini API call."""
-        client = genai.Client(api_key=api_key)
-        
-        # Generate content - use simple call first, then add config if needed
-        # According to quickstart, the API is: client.models.generate_content(model="...", contents="...")
+    # Build request body
+    request_body = {
+        "contents": [{"parts": [{"text": prompt}]}]
+    }
+    
+    # Add generation config if needed (only temperature, no token limits unless explicitly set)
+    if options.temperature is not None or (options.max_tokens and options.max_tokens > 0):
+        gen_config = {}
+        # Only set maxOutputTokens if explicitly provided and > 0 (no default limits)
+        if options.max_tokens and options.max_tokens > 0:
+            gen_config["maxOutputTokens"] = options.max_tokens
+        if options.temperature is not None:
+            gen_config["temperature"] = options.temperature
+        if gen_config:
+            request_body["generationConfig"] = gen_config
+    
+    # Retry logic for rate limiting (429 errors)
+    max_retries = 3
+    base_delay = 2.0  # Start with 2 seconds
+    
+    for attempt in range(max_retries):
         try:
-            # Try with generation config if we have max_tokens or temperature
-            if options.max_tokens or options.temperature is not None:
-                # Build generation config dict
-                gen_config = {}
-                if options.max_tokens:
-                    gen_config["max_output_tokens"] = min(options.max_tokens, 1000)  # Cap at 1000 for speed
-                if options.temperature is not None:
-                    gen_config["temperature"] = options.temperature
+            # Use async httpx directly - no timeout, no limits!
+            async with httpx.AsyncClient(timeout=None) as client:
+                response = await client.post(url, params=params, json=request_body)
                 
-                # Try passing as keyword argument (may vary by SDK version)
-                try:
-                    response = client.models.generate_content(
-                        model=model_name,
-                        contents=prompt,
-                        **gen_config  # Pass as kwargs
-                    )
-                except TypeError:
-                    # Fallback: try without config if SDK doesn't support it
-                    response = client.models.generate_content(
-                        model=model_name,
-                        contents=prompt,
-                    )
-            else:
-                # Simple call without config
-                response = client.models.generate_content(
-                    model=model_name,
-                    contents=prompt,
-                )
-            return response
-        except Exception as e:
-            print(f"[Gemini] API call error: {e}")
-            import traceback
-            traceback.print_exc()
+                # Handle 429 rate limit errors with retry
+                if response.status_code == 429:
+                    if attempt < max_retries - 1:
+                        # Exponential backoff: 2s, 4s, 8s
+                        delay = base_delay * (2 ** attempt)
+                        print(f"[Gemini] Rate limited (429). Retrying in {delay}s (attempt {attempt + 1}/{max_retries})...")
+                        await asyncio.sleep(delay)
+                        continue
+                    else:
+                        # Last attempt failed
+                        raise httpx.HTTPStatusError(
+                            f"Gemini API rate limit exceeded after {max_retries} attempts. Please wait before retrying.",
+                            request=response.request,
+                            response=response
+                        )
+                
+                # For other errors, raise immediately
+                response.raise_for_status()
+                response_data = response.json()
+                break  # Success - exit retry loop
+                
+        except httpx.TimeoutException:
+            raise TimeoutError(f"Gemini API call timed out")
+        except httpx.HTTPStatusError as e:
+            # Re-raise if it's a 429 we couldn't handle, or other HTTP errors
+            if e.response.status_code == 429 and attempt == max_retries - 1:
+                raise  # Already handled above
             raise
-    
-    try:
-        # Run in thread pool with timeout
-        loop = asyncio.get_event_loop()
-        response = await asyncio.wait_for(
-            loop.run_in_executor(_executor, _call_gemini),
-            timeout=timeout_seconds
-        )
-    except asyncio.TimeoutError:
-        raise TimeoutError(f"Gemini API call timed out after {timeout_seconds} seconds")
-    except Exception as e:
-        print(f"[Gemini] Error: {e}")
-        raise
+        except Exception as e:
+            # For non-HTTP errors, don't retry
+            print(f"[Gemini] Error: {e}")
+            raise
     
     # Extract text from response
     text = ""
-    if hasattr(response, 'text'):
-        text = response.text
-    elif hasattr(response, 'candidates') and len(response.candidates) > 0:
-        # Fallback: try to extract from candidates
-        candidate = response.candidates[0]
-        if hasattr(candidate, 'content'):
-            if hasattr(candidate.content, 'parts'):
-                text = "".join([part.text for part in candidate.content.parts if hasattr(part, 'text')])
-            elif hasattr(candidate.content, 'text'):
-                text = candidate.content.text
-    else:
-        text = str(response)
+    if isinstance(response_data, dict):
+        candidates = response_data.get("candidates", [])
+        if not candidates:
+            raise ValueError("Gemini API returned no candidates in response")
+        
+        candidate = candidates[0]
+        
+        # Check for safety filters or blocked content
+        if "finishReason" in candidate:
+            finish_reason = candidate.get("finishReason")
+            if finish_reason in ["SAFETY", "RECITATION", "OTHER"]:
+                safety_ratings = candidate.get("safetyRatings", [])
+                reasons = [r.get("category", "UNKNOWN") for r in safety_ratings if r.get("blocked", False)]
+                if reasons:
+                    raise ValueError(f"Gemini API blocked content due to safety filters: {', '.join(reasons)}")
+                else:
+                    raise ValueError(f"Gemini API blocked content (finishReason: {finish_reason})")
+        
+        content = candidate.get("content", {})
+        parts = content.get("parts", [])
+        if parts:
+            text = parts[0].get("text", "")
+        else:
+            # Sometimes content is empty but not blocked - check for finishReason
+            finish_reason = candidate.get("finishReason", "UNKNOWN")
+            if finish_reason == "MAX_TOKENS":
+                raise ValueError("Gemini API response was truncated (MAX_TOKENS) but no text was returned. Try increasing max_tokens.")
+            elif finish_reason == "STOP":
+                print(f"[Gemini] Warning: Response has no parts but finishReason is STOP. Content: {content}")
+            else:
+                print(f"[Gemini] Warning: Response has no parts. FinishReason: {finish_reason}, Content: {content}")
     
     if not text:
-        raise ValueError("Gemini API returned empty response")
+        # Log the full response for debugging
+        print(f"[Gemini] Error: Gemini API returned empty response. Full response: {json.dumps(response_data, indent=2)}")
+        raise ValueError(f"Gemini API returned empty response. Finish reason: {candidate.get('finishReason', 'N/A')}")
     
     # Extract usage information if available
     usage = {}
-    if hasattr(response, 'usage_metadata'):
-        usage_metadata = response.usage_metadata
+    usage_metadata = response_data.get("usageMetadata", {})
+    if usage_metadata:
         usage = {
-            "prompt_tokens": getattr(usage_metadata, 'prompt_token_count', None),
-            "completion_tokens": getattr(usage_metadata, 'completion_token_count', None),
-            "total_tokens": getattr(usage_metadata, 'total_token_count', None),
+            "prompt_tokens": usage_metadata.get("promptTokenCount"),
+            "completion_tokens": usage_metadata.get("candidatesTokenCount"),
+            "total_tokens": usage_metadata.get("totalTokenCount"),
         }
     
     return LLMResponse(
@@ -167,27 +173,17 @@ async def check_gemini_health() -> bool:
         if not api_key:
             return False
         
-        from google import genai
+        url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
+        params = {"key": api_key}
+        request_body = {"contents": [{"parts": [{"text": "Hi"}]}]}
         
-        def _health_check():
-            client = genai.Client(api_key=api_key)
-            response = client.models.generate_content(
-                model="gemini-2.5-flash",
-                contents="Hi",
-            )
-            return hasattr(response, 'text') and response.text
-        
-        # Run with 5 second timeout for health check
-        loop = asyncio.get_event_loop()
-        result = await asyncio.wait_for(
-            loop.run_in_executor(_executor, _health_check),
-            timeout=5.0
-        )
-        return result
-    except asyncio.TimeoutError:
-        print("[Gemini] Health check timed out")
-        return False
+        # Use direct httpx with no timeout for health check
+        async with httpx.AsyncClient(timeout=None) as client:
+            response = await client.post(url, params=params, json=request_body)
+            response.raise_for_status()
+            data = response.json()
+            candidates = data.get("candidates", [])
+            return len(candidates) > 0 and candidates[0].get("content", {}).get("parts", [{}])[0].get("text")
     except Exception as e:
         print(f"[Gemini] Health check failed: {e}")
         return False
-

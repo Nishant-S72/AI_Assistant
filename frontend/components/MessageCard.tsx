@@ -15,11 +15,9 @@ interface MessageCardProps {
 }
 
 export default function MessageCard({ message, isSelected }: MessageCardProps) {
-  const tags = message.contact_name.includes('Martinez')
-    ? ['lead']
-    : message.contact_name.includes('Chen')
-    ? ['complaint']
-    : ['meeting'];
+  // Tags should come from the contact data, but Message interface doesn't include tags
+  // For now, use empty array - tags will be shown in contact detail view
+  const tags: string[] = [];
 
   return (
     <Link

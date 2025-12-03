@@ -41,6 +41,31 @@ def classify_intent(user_message: str) -> Dict[str, Any]:
             "method": "rules"
         }
     
+    # Step 1.5: Check for informational questions (NOT action requests) -> general_intent
+    # These are questions asking FOR information, not requesting actions
+    informational_patterns = [
+        r'what (is|are) (the|a) (date|time|day|today|now)',
+        r'what (is|are) (the|a) (date|time|day) (today|now)',
+        r'what (day|date|time) (is|it) (today|now)',
+        r'what\'?s (the|a) (date|time|day) (today|now)',
+        r'when (is|are) (it|they|we)',
+        r'how (many|much|long|old)',
+        r'who (is|are|was|were)',
+        r'where (is|are|was|were)',
+        r'why (is|are|was|were|do|does|did)',
+        r'can you (tell|show|explain|help) (me|us) (what|when|where|how|who|why)',
+        r'what (does|do|is|are) (this|that|it|they) (mean|mean\?|refer to)',
+    ]
+    
+    for pattern in informational_patterns:
+        if re.search(pattern, lower_message, re.IGNORECASE):
+            return {
+                "intent": "general_intent",
+                "confidence": 0.95,
+                "reasons": ["Informational question detected"],
+                "method": "rules"
+            }
+    
     # Step 2: Check for action intent (scheduling, calendar, etc.)
     action_candidate = False
     action_reasons = []
@@ -104,13 +129,38 @@ def classify_intent(user_message: str) -> Dict[str, Any]:
         action_candidate = True
         action_reasons.append("Duration specified")
     
-    # Strong action intent if multiple signals
-    if action_candidate and (len(action_matches) > 0 or len(time_matches) > 0):
-        confidence = 0.9 if (len(action_matches) > 1 or len(time_matches) > 0) else 0.85
+    # CRITICAL: Require BOTH action keywords AND time/context for action_intent
+    # Time patterns alone (like "today", "tomorrow") are NOT enough - need explicit action verbs
+    # This prevents "what is the date today?" from being misclassified as action_intent
+    has_action_keyword = len(action_matches) > 0
+    has_time_context = len(time_matches) > 0 or any(re.search(p, lower_message, re.IGNORECASE) for p in timezone_patterns) or re.search(email_pattern, user_message, re.IGNORECASE)
+    
+    # Only classify as action_intent if we have explicit action keywords
+    # Time patterns alone are not sufficient (they can appear in informational questions)
+    if has_action_keyword:
+        # If we have action keywords + time context, high confidence
+        if has_time_context:
+            confidence = 0.95
+        # If we have action keywords but no time context, still action but lower confidence
+        else:
+            confidence = 0.85
+        
         return {
             "intent": "action_intent",
             "confidence": confidence,
             "reasons": action_reasons,
+            "method": "rules"
+        }
+    
+    # If we have time patterns but NO action keywords, it's likely a general question
+    # (e.g., "what is the date today?" has "today" but no action verb)
+    if has_time_context and not has_action_keyword:
+        # Use LLM to disambiguate - could be general question or implicit action request
+        # But default to general_intent with lower confidence
+        return {
+            "intent": "general_intent",
+            "confidence": 0.75,
+            "reasons": ["Time reference without explicit action keyword - likely informational"],
             "method": "rules"
         }
     
@@ -137,8 +187,8 @@ def classify_intent(user_message: str) -> Dict[str, Any]:
     
     # Step 4: If ambiguous, use LLM fallback
     # Only call LLM if we're uncertain (no strong rule matches)
-    if not action_candidate and not policy_matches:
-        return _classify_with_llm(user_message)
+    # NOTE: This is now handled in classify_intent_async, not here
+    # We return general_intent as default and let async version call LLM if needed
     
     # Default to general_intent with moderate confidence
     return {
@@ -156,31 +206,37 @@ async def _classify_with_llm(user_message: str) -> Dict[str, Any]:
     """
     try:
         classification_prompt = f"""Classify this user message into one of three intents:
-- policy_intent: User asks about company policies, rules, procedures, compliance
-- action_intent: User requests an action (schedule meeting, create task, send email)
-- general_intent: General questions, explanations, casual conversation
+
+1. policy_intent: User asks ABOUT policies, rules, procedures (e.g., "What is our refund policy?", "What does the policy say?")
+2. action_intent: User explicitly REQUESTS an ACTION with action verbs (e.g., "Schedule a meeting", "Create a task", "Book a call", "Add event")
+3. general_intent: General questions, informational queries, casual conversation (e.g., "Hi", "What's the date today?", "What time is it?", "How are you?")
+
+IMPORTANT:
+- Questions asking FOR information (like "what is the date?", "what time is it?") are general_intent, NOT action_intent
+- Only classify as action_intent if user explicitly requests to DO something (schedule, book, create, add, etc.)
+- Time references alone (like "today", "tomorrow") do NOT make it action_intent - need explicit action verbs
 
 User message: "{user_message}"
 
-Respond with ONLY a JSON object in this exact format:
+Return ONLY valid JSON in this format:
 {{
   "intent": "policy_intent|action_intent|general_intent",
   "confidence": 0.0-1.0,
   "reason": "brief explanation"
 }}
 
-No other text, just the JSON."""
+No markdown, no code blocks, just the JSON object."""
 
         llm_response = await generate_chat_completion(
             LLMRequestOptions(
-                model=os.getenv("GEMINI_MODEL") or os.getenv("LLM_MODEL", "gemini-2.5-flash"),
+                model=os.getenv("OPENAI_MODEL") or os.getenv("LLM_MODEL", "gpt-4o-mini"),
                 messages=[
                     LLMMessage("system", "You are an intent classification assistant. Return only valid JSON."),
                     LLMMessage("user", classification_prompt),
                 ],
                 max_tokens=80,  # Reduced for faster classification
                 temperature=0.1,  # Low temperature for deterministic classification
-                use_local=False,  # Skip Ollama when using Gemini
+                use_local=False,  # Skip Ollama when using OpenAI
                 correlation_id=f"intent_classify_{os.urandom(4).hex()}",
             )
         )

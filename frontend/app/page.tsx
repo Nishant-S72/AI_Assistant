@@ -66,31 +66,60 @@ export default function Home() {
   const [categorySummary, setCategorySummary] = useState<string>('');
   const [generatingCategorySummary, setGeneratingCategorySummary] = useState(false);
   const [taskFilter, setTaskFilter] = useState<'all' | 'P0' | 'P1' | 'P2'>('all');
+  const [showAISummary, setShowAISummary] = useState(false);
 
   // Poll for summary if it's being generated
   const pollForSummary = async () => {
-    const maxAttempts = 10; // Poll for up to 10 seconds
+    const maxAttempts = 30; // Poll for up to 30 seconds (AI can take time)
     let attempts = 0;
     
     const poll = async () => {
-      if (attempts >= maxAttempts) return;
+      if (attempts >= maxAttempts) {
+        setShowAISummary(true); // Show even if no summary after max attempts
+        return;
+      }
       
       try {
         const data = await getSummary();
         if (data.summaryParagraph) {
-          setSummary(data);
+          // Update summary with the AI-generated paragraph
+          setSummary((prev) => {
+            if (!prev) return data;
+            return {
+              ...prev,
+              summaryParagraph: data.summaryParagraph,
+              summaryGenerating: false
+            };
+          });
+          
+          // Update cache
           if (setSummaryCache && typeof setSummaryCache === 'function') {
-            setSummaryCache(data);
+            setSummaryCache({ ...summary, summaryParagraph: data.summaryParagraph, summaryGenerating: false });
+          } else {
+            useAppStore.setState({ 
+              summaryCache: { ...summary, summaryParagraph: data.summaryParagraph, summaryGenerating: false },
+              summaryCacheTimestamp: Date.now() 
+            });
           }
+          
+          setShowAISummary(true); // Show the summary when it's ready
           return; // Stop polling
         }
         
         attempts++;
         if (attempts < maxAttempts) {
           setTimeout(poll, 1000); // Poll every second
+        } else {
+          setShowAISummary(true); // Show even if no summary
         }
       } catch (error) {
         console.error('Error polling for summary:', error);
+        attempts++;
+        if (attempts < maxAttempts) {
+          setTimeout(poll, 1000);
+        } else {
+          setShowAISummary(true); // Show even on error
+        }
       }
     };
     
@@ -113,14 +142,22 @@ export default function Home() {
     if (!force && summaryCache && !shouldRefreshSummary()) {
       setSummary(summaryCache);
       setLoading(false);
+      setShowAISummary(true); // Show cached summary immediately
       return;
     }
 
     try {
       setLoading(true);
       setError(null);
+      setShowAISummary(false); // Hide AI summary initially
+      
+      // Load metrics immediately (non-blocking)
       const data = await getSummary();
+      
+      // Set summary with metrics immediately, even if AI summary is still generating
       setSummary(data);
+      setLoading(false); // Stop loading immediately after metrics are loaded
+      
       // Safety check before calling setSummaryCache
       if (setSummaryCache && typeof setSummaryCache === 'function') {
         setSummaryCache(data); // Cache the result
@@ -129,14 +166,22 @@ export default function Home() {
         useAppStore.setState({ summaryCache: data, summaryCacheTimestamp: Date.now() });
       }
       
-      // If summary is still generating, start polling
+      // If summary is still generating, show placeholder immediately and start polling
       if (data.summaryGenerating && !data.summaryParagraph) {
+        setShowAISummary(true); // Show placeholder immediately
         pollForSummary();
+      } else if (data.summaryParagraph) {
+        // Summary is ready, show it after a brief delay
+        setTimeout(() => {
+          setShowAISummary(true);
+        }, 300);
+      } else {
+        // No summary and not generating - show placeholder area anyway
+        setShowAISummary(true);
       }
     } catch (err: any) {
       console.error('Failed to load summary:', err);
       setError(err.message || 'Failed to load summary');
-    } finally {
       setLoading(false);
     }
   };
@@ -292,27 +337,27 @@ export default function Home() {
                   
                   {/* Action Items Summary - Clickable Badges */}
                   <div className="flex flex-wrap items-center gap-3">
-                    {summary.tasks.counts.P0 > 0 && (
+                    {summary.totals && summary.tasks && ((summary.totals.urgent ?? 0) + (summary.tasks.counts?.P0 ?? 0)) > 0 && (
                       <button
                         onClick={() => generateCategorySummary('urgent')}
                         className="action-badge-on-pane inline-flex items-center gap-2 px-4 py-2.5 bg-red-100 dark:bg-red-900/40 text-red-800 dark:text-red-200 rounded-xl text-sm font-semibold hover:bg-red-200 dark:hover:bg-red-900/60 hover:text-red-900 dark:hover:text-red-100 hover:shadow-md transition-all duration-300 ease-out border border-red-300 dark:border-red-700/50"
                         title="Click to see urgent tasks summary"
                       >
                         <span>🚨</span>
-                        <span>{summary.tasks.counts.P0} Urgent</span>
+                        <span>{(summary.totals.urgent ?? 0) + (summary.tasks.counts?.P0 ?? 0)} Urgent</span>
                       </button>
                     )}
-                    {summary.tasks.counts.P1 > 0 && (
+                    {summary.totals && summary.tasks && ((summary.totals.highPriority ?? 0) + (summary.tasks.counts?.P1 ?? 0)) > 0 && (
                       <button
                         onClick={() => generateCategorySummary('high')}
                         className="action-badge-on-pane inline-flex items-center gap-2 px-4 py-2.5 bg-amber-100 dark:bg-amber-900/40 text-amber-800 dark:text-amber-200 rounded-xl text-sm font-semibold hover:bg-amber-200 dark:hover:bg-amber-900/60 hover:text-amber-900 dark:hover:text-amber-100 hover:shadow-md transition-all duration-300 ease-out border border-amber-300 dark:border-amber-700/50"
                         title="Click to see high priority tasks summary"
                       >
                         <span>⚠️</span>
-                        <span>{summary.tasks.counts.P1} High Priority</span>
+                        <span>{(summary.totals.highPriority ?? 0) + (summary.tasks.counts?.P1 ?? 0)} High Priority</span>
                       </button>
                     )}
-                    {summary.totals.unread > 0 && (
+                    {summary.totals && (summary.totals.unread ?? 0) > 0 && (
                       <button
                         onClick={() => generateCategorySummary('unread')}
                         className="action-badge-on-pane inline-flex items-center gap-2 px-4 py-2.5 bg-blue-100 dark:bg-blue-900/40 text-blue-800 dark:text-blue-200 rounded-xl text-sm font-semibold hover:bg-blue-200 dark:hover:bg-blue-900/60 hover:text-blue-900 dark:hover:text-blue-100 hover:shadow-md transition-all duration-300 ease-out border border-blue-300 dark:border-blue-700/50"
@@ -322,7 +367,7 @@ export default function Home() {
                         <span>{summary.totals.unread} Unread</span>
                       </button>
                     )}
-                    {summary.totals.complaints > 0 && (
+                    {summary.totals && (summary.totals.complaints ?? 0) > 0 && (
                       <button
                         onClick={() => generateCategorySummary('complaints')}
                         className="action-badge-on-pane inline-flex items-center gap-2 px-4 py-2.5 bg-yellow-100 dark:bg-yellow-900/40 text-yellow-800 dark:text-yellow-200 rounded-xl text-sm font-semibold hover:bg-yellow-200 dark:hover:bg-yellow-900/60 hover:text-yellow-900 dark:hover:text-yellow-100 hover:shadow-md transition-all duration-300 ease-out border border-yellow-300 dark:border-yellow-700/50"
@@ -332,7 +377,7 @@ export default function Home() {
                         <span>{summary.totals.complaints} Complaints</span>
                       </button>
                     )}
-                    {summary.totals.leads > 0 && (
+                    {summary.totals && (summary.totals.leads ?? 0) > 0 && (
                       <button
                         onClick={() => generateCategorySummary('leads')}
                         className="action-badge-on-pane inline-flex items-center gap-2 px-4 py-2.5 bg-emerald-100 dark:bg-emerald-900/40 text-emerald-800 dark:text-emerald-200 rounded-xl text-sm font-semibold hover:bg-emerald-200 dark:hover:bg-emerald-900/60 hover:text-emerald-900 dark:hover:text-emerald-100 hover:shadow-md transition-all duration-300 ease-out border border-emerald-300 dark:border-emerald-700/50"
@@ -344,28 +389,47 @@ export default function Home() {
                     )}
                   </div>
                   
-                  {/* Summary Text - Generated by LLM */}
-                  {summary.summaryGenerating && !summary.summaryParagraph ? (
-                    <div className="mt-5 flex items-center gap-3 text-[var(--muted)]">
-                      <div className="inline-block h-5 w-5 animate-spin rounded-full border-2 border-gray-200 border-t-[var(--primary)]"></div>
-                      <span className="text-sm font-medium">Generating AI summary...</span>
-                    </div>
-                  ) : summary.summaryParagraph ? (
-                    <div className="mt-5 p-5 bg-white/60 rounded-xl border border-[var(--glass-border)]">
-                      <p className="text-gray-800 leading-relaxed text-base font-normal text-premium">
-                        {summary.summaryParagraph}
-                      </p>
-                    </div>
-                  ) : (
-                    <div className="mt-5 p-5 bg-white/60 rounded-xl border border-[var(--glass-border)]">
-                      <p className="text-gray-800 leading-relaxed text-sm">
-                        Unable to generate AI summary. Please ensure Ollama is running:
-                      </p>
-                      <div className="mt-3 space-y-1">
-                        <code className="block p-2 bg-white/40 rounded text-xs">ollama serve</code>
-                        <code className="block p-2 bg-white/40 rounded text-xs">ollama pull tinyllama</code>
-                      </div>
-                    </div>
+                  {/* Summary Text - Generated by LLM - Only show after metrics are loaded */}
+                  {showAISummary && (
+                    <>
+                      {summary.summaryGenerating && !summary.summaryParagraph ? (
+                        <motion.div
+                          initial={{ opacity: 0, y: 10 }}
+                          animate={{ opacity: 1, y: 0 }}
+                          transition={{ duration: 0.3 }}
+                          className="mt-5 p-5 bg-gradient-to-br from-[var(--primary)]/10 to-[var(--accent)]/10 rounded-xl border border-[var(--glass-border)]"
+                        >
+                          <div className="flex items-center gap-3">
+                            <div className="inline-block h-6 w-6 animate-spin rounded-full border-2 border-gray-300 border-t-[var(--primary)]"></div>
+                            <div>
+                              <p className="text-[var(--primary)] font-semibold text-base">Soraya is working...</p>
+                              <p className="text-[var(--muted)] text-sm mt-0.5">Analyzing your inbox and generating insights</p>
+                            </div>
+                          </div>
+                        </motion.div>
+                      ) : summary.summaryParagraph ? (
+                        <motion.div
+                          initial={{ opacity: 0, y: 10 }}
+                          animate={{ opacity: 1, y: 0 }}
+                          transition={{ duration: 0.3 }}
+                          className="mt-5 p-5 bg-white/60 rounded-xl border border-[var(--glass-border)]"
+                        >
+                          <p className="text-gray-800 leading-relaxed text-base font-normal text-premium">
+                            {summary.summaryParagraph}
+                          </p>
+                        </motion.div>
+                      ) : (
+                        <div className="mt-5 p-5 bg-white/60 rounded-xl border border-[var(--glass-border)]">
+                          <p className="text-gray-800 leading-relaxed text-sm">
+                            Unable to generate AI summary. Please ensure OpenAI API is configured:
+                          </p>
+                          <div className="mt-3 space-y-1">
+                            <code className="block p-2 bg-white/40 rounded text-xs">Check OPENAI_API_KEY in .env</code>
+                            <code className="block p-2 bg-white/40 rounded text-xs">Ensure OpenAI API key has available quota</code>
+                          </div>
+                        </div>
+                      )}
+                    </>
                   )}
                 </div>
               </div>
@@ -438,25 +502,25 @@ export default function Home() {
               <GlassCard className="p-6">
                 <p className="text-sm font-medium text-[var(--muted)] mb-3 uppercase tracking-wide">Total Messages</p>
                 <p className="text-4xl font-bold text-theme-primary heading-premium">
-                  <AnimatedNumber value={summary.totals.totalMessages} />
+                  <AnimatedNumber value={summary.totals?.totalMessages ?? 0} />
                 </p>
               </GlassCard>
               <GlassCard className="p-6">
                 <p className="text-sm font-medium text-[var(--muted)] mb-3 uppercase tracking-wide">Unread</p>
                 <p className="text-4xl font-bold text-theme-primary heading-premium">
-                  <AnimatedNumber value={summary.totals.unread} />
+                  <AnimatedNumber value={summary.totals?.unread ?? 0} />
                 </p>
               </GlassCard>
               <GlassCard className="p-6">
                 <p className="text-sm font-medium text-[var(--muted)] mb-3 uppercase tracking-wide">Leads</p>
                 <p className="text-4xl font-bold text-theme-primary heading-premium">
-                  <AnimatedNumber value={summary.totals.leads} />
+                  <AnimatedNumber value={summary.totals?.leads ?? 0} />
                 </p>
               </GlassCard>
               <GlassCard className="p-6">
                 <p className="text-sm font-medium text-[var(--muted)] mb-3 uppercase tracking-wide">Complaints</p>
                 <p className="text-4xl font-bold text-theme-primary heading-premium">
-                  <AnimatedNumber value={summary.totals.complaints} />
+                  <AnimatedNumber value={summary.totals?.complaints ?? 0} />
                 </p>
               </GlassCard>
             </motion.div>
@@ -494,7 +558,7 @@ export default function Home() {
               >
                 <span className="text-sm font-semibold text-theme-primary">All</span>
                 <span className="text-sm font-bold text-theme-primary">
-                  {summary.tasks.counts.P0 + summary.tasks.counts.P1 + summary.tasks.counts.P2}
+                  {(summary.tasks?.counts?.P0 ?? 0) + (summary.tasks?.counts?.P1 ?? 0) + (summary.tasks?.counts?.P2 ?? 0)}
                 </span>
               </button>
               <button
@@ -508,7 +572,7 @@ export default function Home() {
               >
                 <TaskPriorityBadge priority="P0" variant="on-pane" />
                 <span className="text-base font-semibold text-theme-primary">
-                  {summary.tasks.counts.P0}
+                  {summary.tasks?.counts?.P0 ?? 0}
                 </span>
               </button>
               <button
@@ -522,7 +586,7 @@ export default function Home() {
               >
                 <TaskPriorityBadge priority="P1" variant="on-pane" />
                 <span className="text-base font-semibold text-theme-primary">
-                  {summary.tasks.counts.P1}
+                  {summary.tasks?.counts?.P1 ?? 0}
                 </span>
               </button>
               <button
@@ -536,14 +600,14 @@ export default function Home() {
               >
                 <TaskPriorityBadge priority="P2" variant="on-pane" />
                 <span className="text-base font-semibold text-theme-primary">
-                  {summary.tasks.counts.P2}
+                  {summary.tasks?.counts?.P2 ?? 0}
                 </span>
               </button>
             </div>
 
             {/* Filtered Tasks Display - Scrollable */}
             <div className="max-h-[600px] overflow-y-auto custom-scrollbar pr-2">
-              {(taskFilter === 'all' || taskFilter === 'P0') && summary.tasks.P0.length > 0 && (
+              {(taskFilter === 'all' || taskFilter === 'P0') && summary.tasks?.P0 && summary.tasks.P0.length > 0 && (
                 <div className="mb-8">
                   <h3 className="text-lg font-semibold text-theme-primary mb-5 heading-premium">
                     P0 - Urgent ({summary.tasks.P0.length})
@@ -552,7 +616,7 @@ export default function Home() {
                 </div>
               )}
 
-              {(taskFilter === 'all' || taskFilter === 'P1') && summary.tasks.P1.length > 0 && (
+              {(taskFilter === 'all' || taskFilter === 'P1') && summary.tasks?.P1 && summary.tasks.P1.length > 0 && (
                 <div className="mb-8">
                   <h3 className="text-lg font-semibold text-theme-primary mb-5 heading-premium">
                     P1 - High ({summary.tasks.P1.length})
@@ -561,7 +625,7 @@ export default function Home() {
                 </div>
               )}
 
-              {(taskFilter === 'all' || taskFilter === 'P2') && summary.tasks.P2.length > 0 && (
+              {(taskFilter === 'all' || taskFilter === 'P2') && summary.tasks?.P2 && summary.tasks.P2.length > 0 && (
                 <div>
                   <h3 className="text-lg font-semibold text-theme-primary mb-5 heading-premium">
                     P2 - Normal ({summary.tasks.P2.length})
@@ -571,10 +635,10 @@ export default function Home() {
               )}
             </div>
 
-            {((taskFilter === 'all' && summary.tasks.P0.length === 0 && summary.tasks.P1.length === 0 && summary.tasks.P2.length === 0) ||
-              (taskFilter === 'P0' && summary.tasks.P0.length === 0) ||
-              (taskFilter === 'P1' && summary.tasks.P1.length === 0) ||
-              (taskFilter === 'P2' && summary.tasks.P2.length === 0)) && (
+            {summary.tasks && ((taskFilter === 'all' && (!summary.tasks.P0 || summary.tasks.P0.length === 0) && (!summary.tasks.P1 || summary.tasks.P1.length === 0) && (!summary.tasks.P2 || summary.tasks.P2.length === 0)) ||
+              (taskFilter === 'P0' && (!summary.tasks.P0 || summary.tasks.P0.length === 0)) ||
+              (taskFilter === 'P1' && (!summary.tasks.P1 || summary.tasks.P1.length === 0)) ||
+              (taskFilter === 'P2' && (!summary.tasks.P2 || summary.tasks.P2.length === 0))) && (
               <p className="text-base text-[var(--muted)] py-8 font-medium text-center">
                 No {taskFilter === 'all' ? '' : taskFilter + ' '}tasks at the moment
               </p>
@@ -593,7 +657,7 @@ export default function Home() {
             <h2 className="text-2xl font-semibold text-gray-900 mb-6 heading-premium">
               Top Leads
             </h2>
-            {summary.topLeads.length > 0 ? (
+            {summary.topLeads && summary.topLeads.length > 0 ? (
               <div className="space-y-3">
                 {summary.topLeads.map((lead) => (
                   <div

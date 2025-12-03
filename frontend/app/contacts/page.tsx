@@ -39,12 +39,30 @@ export default function ContactsPage() {
       const data = await api.getContacts(search, tag);
       setContacts(data);
       
-      // Extract unique tags from all contacts
+      // Extract unique tags from all contacts, but only show the 6 allowed categories
+      const allowedTags = [
+        'new-lead',
+        'long-standing',
+        'urgent-action-required',
+        'potential-interest',
+        'escalation',
+        'high-priority'
+      ];
       const allTags = new Set<string>();
       data.forEach((contact) => {
-        contact.tags?.forEach((tag) => allTags.add(tag));
+        contact.tags?.forEach((tag) => {
+          // Only include tags that are in the allowed list
+          if (allowedTags.includes(tag)) {
+            allTags.add(tag);
+          }
+        });
       });
-      setAvailableTags(Array.from(allTags).sort());
+      // Sort by the order in allowedTags
+      setAvailableTags(Array.from(allTags).sort((a, b) => {
+        const indexA = allowedTags.indexOf(a);
+        const indexB = allowedTags.indexOf(b);
+        return (indexA === -1 ? 999 : indexA) - (indexB === -1 ? 999 : indexB);
+      }));
     } catch (error) {
       console.error('Error loading contacts:', error);
     } finally {
@@ -110,19 +128,49 @@ export default function ContactsPage() {
             >
               All
             </button>
-            {availableTags.map((tag) => (
-              <button
-                key={tag}
-                onClick={() => setSelectedTag(selectedTag === tag ? null : tag)}
-                className={`px-3 py-1.5 text-sm rounded-full border transition-all duration-300 ${
-                  selectedTag === tag
-                    ? 'bg-[var(--primary)] text-white border-[var(--primary)] shadow-md'
-                    : 'bg-white/60 dark:bg-[var(--card-bg)] text-theme-primary border-[var(--glass-border)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-hover)]'
-                }`}
-              >
-                {tag}
-              </button>
-            ))}
+            {availableTags.map((tag) => {
+              const tagLabels: Record<string, string> = {
+                'new-lead': 'New Lead',
+                'long-standing': 'Long Standing',
+                'urgent-action-required': 'Urgent Action Required',
+                'potential-interest': 'Potential Interest',
+                'escalation': 'Escalation',
+                'high-priority': 'High Priority',
+              };
+              
+              const tagDescriptions: Record<string, string> = {
+                'new-lead': 'New potential customers with minimal interaction history (0-5 messages, recent contact within 7 days, asking initial questions)',
+                'long-standing': 'Established customers with long history (10+ messages over 30+ days, repeat interactions, loyal relationship)',
+                'urgent-action-required': 'Requires immediate attention (complaints, time-sensitive issues, deadlines, critical problems, "asap", "urgent", "emergency")',
+                'potential-interest': 'Showing interest but not committed (asking about products/services, requesting demos, comparing options, but no purchase yet)',
+                'escalation': 'Issues requiring escalation (dissatisfaction, complaints, refund requests, legal concerns, "speak to manager", "cancel")',
+                'high-priority': 'High-priority customers/accounts (large orders, premium services, significant revenue, key accounts, strategic partners, executive contacts)',
+              };
+              
+              return (
+                <div key={tag} className="relative group">
+                  <button
+                    onClick={() => setSelectedTag(selectedTag === tag ? null : tag)}
+                    className={`px-3 py-1.5 text-sm rounded-full border transition-all duration-300 font-medium flex items-center gap-1.5 ${
+                      selectedTag === tag
+                        ? 'bg-[var(--primary)] text-white border-[var(--primary)] shadow-md'
+                        : 'bg-white/60 dark:bg-[var(--card-bg)] text-theme-primary border-[var(--glass-border)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-hover)]'
+                    }`}
+                  >
+                    {tagLabels[tag] || tag.replace(/-/g, ' ')}
+                    <span className="text-xs opacity-70 cursor-help" title={tagDescriptions[tag] || ''}>
+                      ℹ️
+                    </span>
+                  </button>
+                  {/* Tooltip on hover */}
+                  <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 w-64 p-3 bg-gray-900 text-white text-xs rounded-lg shadow-lg opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none z-10">
+                    <div className="font-semibold mb-1">{tagLabels[tag] || tag.replace(/-/g, ' ')}</div>
+                    <div className="text-gray-300">{tagDescriptions[tag] || 'No description available'}</div>
+                    <div className="absolute bottom-0 left-1/2 -translate-x-1/2 translate-y-full w-0 h-0 border-l-4 border-r-4 border-t-4 border-transparent border-t-gray-900"></div>
+                  </div>
+                </div>
+              );
+            })}
           </div>
         )}
       </div>
@@ -199,28 +247,47 @@ export default function ContactsPage() {
                         {/* Tags */}
                         {contact.tags && contact.tags.length > 0 && (
                           <div className="flex flex-wrap gap-1 mt-3">
-                            {contact.tags.slice(0, 3).map((tag, i) => (
-                              <button
-                                key={i}
-                                onClick={(e) => {
-                                  e.preventDefault();
-                                  e.stopPropagation();
-                                  setSelectedTag(selectedTag === tag ? null : tag);
-                                }}
-                                className={`px-2 py-0.5 text-xs rounded-full border transition-all duration-300 ${
-                                  selectedTag === tag
-                                    ? 'bg-[var(--primary)] text-white border-[var(--primary)]'
-                                    : 'bg-[var(--primary)]/10 text-[var(--primary)] border-[var(--primary)]/20 hover:bg-[var(--primary)]/20'
-                                }`}
-                              >
-                                {tag}
-                              </button>
-                            ))}
-                            {contact.tags.length > 3 && (
-                              <span className="px-2 py-0.5 text-xs rounded-full bg-[var(--muted)]/20 text-theme-muted">
-                                +{contact.tags.length - 3}
-                              </span>
-                            )}
+                            {contact.tags.map((tag, i) => {
+                              // Only show the 6 allowed tags
+                              const allowedTags = ['new-leads', 'long-standing-customers', 'enterprise', 'high-value', 'urgent', 'vip'];
+                              if (!allowedTags.includes(tag)) return null;
+                              
+                              const tagColors: Record<string, string> = {
+                                'new-leads': 'bg-blue-100 text-blue-800 border-blue-200',
+                                'long-standing-customers': 'bg-green-100 text-green-800 border-green-200',
+                                'enterprise': 'bg-purple-100 text-purple-800 border-purple-200',
+                                'high-value': 'bg-amber-100 text-amber-800 border-amber-200',
+                                'urgent': 'bg-red-100 text-red-800 border-red-200',
+                                'vip': 'bg-indigo-100 text-indigo-800 border-indigo-200',
+                              };
+                              
+                              const tagLabels: Record<string, string> = {
+                                'new-leads': 'New Leads',
+                                'long-standing-customers': 'Long Standing',
+                                'enterprise': 'Enterprise',
+                                'high-value': 'High Value',
+                                'urgent': 'Urgent',
+                                'vip': 'VIP',
+                              };
+                              
+                              return (
+                                <button
+                                  key={i}
+                                  onClick={(e) => {
+                                    e.preventDefault();
+                                    e.stopPropagation();
+                                    setSelectedTag(selectedTag === tag ? null : tag);
+                                  }}
+                                  className={`px-2 py-0.5 text-xs rounded-full border transition-all duration-300 font-medium ${
+                                    selectedTag === tag
+                                      ? 'bg-[var(--primary)] text-white border-[var(--primary)] shadow-md'
+                                      : tagColors[tag] || 'bg-gray-100 text-gray-700 border-gray-200'
+                                  }`}
+                                >
+                                  {tagLabels[tag] || tag.replace(/-/g, ' ')}
+                                </button>
+                              );
+                            })}
                           </div>
                         )}
                       </div>

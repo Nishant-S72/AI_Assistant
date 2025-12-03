@@ -26,6 +26,22 @@ export default function ContextPanel({ contact, tasks = [] }: ContextPanelProps)
     );
   }
 
+  // Normalize tags to ensure it's always an array
+  const normalizeTags = (tags: any): string[] => {
+    if (!tags) return [];
+    if (Array.isArray(tags)) return tags;
+    if (typeof tags === 'string') {
+      try {
+        const parsed = JSON.parse(tags);
+        return Array.isArray(parsed) ? parsed : [];
+      } catch {
+        return [];
+      }
+    }
+    return [];
+  };
+
+  const contactTags = normalizeTags(contact.tags);
   const pendingTasks = tasks.filter((t) => t.status === 'pending');
 
   return (
@@ -69,27 +85,60 @@ export default function ContextPanel({ contact, tasks = [] }: ContextPanelProps)
         </div>
 
         {/* Tags */}
-        {contact.tags && contact.tags.length > 0 && (
+        {contactTags && contactTags.length > 0 && (
           <div>
             <h4 className="text-sm font-medium text-gray-700 mb-2">
               Tags
             </h4>
             <div className="flex flex-wrap gap-2">
-              {contact.tags.map((tag) => (
-                <span
-                  key={tag}
-                  className={cn(
-                    'px-2 py-1 text-xs rounded-full',
-                    tag === 'lead' && 'bg-green-100 text-green-800',
-                    tag === 'complaint' && 'bg-red-100 text-red-800',
-                    tag === 'meeting' && 'bg-blue-100 text-blue-800',
-                    !['lead', 'complaint', 'meeting'].includes(tag) &&
-                      'bg-gray-100 text-gray-700'
-                  )}
-                >
-                  {tag}
-                </span>
-              ))}
+              {contactTags.map((tag) => {
+                const tagLabels: Record<string, string> = {
+                  'new-lead': 'New Lead',
+                  'long-standing': 'Long Standing',
+                  'urgent-action-required': 'Urgent Action Required',
+                  'potential-interest': 'Potential Interest',
+                  'escalation': 'Escalation',
+                  'high-priority': 'High Priority',
+                };
+                
+                const tagDescriptions: Record<string, string> = {
+                  'new-lead': 'New potential customers with minimal interaction history (0-5 messages, recent contact within 7 days, asking initial questions)',
+                  'long-standing': 'Established customers with long history (10+ messages over 30+ days, repeat interactions, loyal relationship)',
+                  'urgent-action-required': 'Requires immediate attention (complaints, time-sensitive issues, deadlines, critical problems, "asap", "urgent", "emergency")',
+                  'potential-interest': 'Showing interest but not committed (asking about products/services, requesting demos, comparing options, but no purchase yet)',
+                  'escalation': 'Issues requiring escalation (dissatisfaction, complaints, refund requests, legal concerns, "speak to manager", "cancel")',
+                  'high-priority': 'High-priority customers/accounts (large orders, premium services, significant revenue, key accounts, strategic partners, executive contacts)',
+                };
+                
+                return (
+                  <div key={tag} className="relative group">
+                    <span
+                      className={cn(
+                        'px-2 py-1 text-xs rounded-full font-medium flex items-center gap-1',
+                        tag === 'new-lead' && 'bg-blue-100 text-blue-800',
+                        tag === 'long-standing' && 'bg-green-100 text-green-800',
+                        tag === 'urgent-action-required' && 'bg-red-100 text-red-800',
+                        tag === 'potential-interest' && 'bg-yellow-100 text-yellow-800',
+                        tag === 'escalation' && 'bg-orange-100 text-orange-800',
+                        tag === 'high-priority' && 'bg-purple-100 text-purple-800',
+                        !['new-lead', 'long-standing', 'urgent-action-required', 'potential-interest', 'escalation', 'high-priority'].includes(tag) &&
+                          'bg-gray-100 text-gray-700'
+                      )}
+                    >
+                      {tagLabels[tag] || tag.replace(/-/g, ' ')}
+                      <span className="text-xs opacity-70 cursor-help" title={tagDescriptions[tag] || ''}>
+                        ℹ️
+                      </span>
+                    </span>
+                    {/* Tooltip on hover */}
+                    <div className="absolute bottom-full left-0 mb-2 w-64 p-3 bg-gray-900 text-white text-xs rounded-lg shadow-lg opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none z-10">
+                      <div className="font-semibold mb-1">{tagLabels[tag] || tag.replace(/-/g, ' ')}</div>
+                      <div className="text-gray-300">{tagDescriptions[tag] || 'No description available'}</div>
+                      <div className="absolute bottom-0 left-4 translate-y-full w-0 h-0 border-l-4 border-r-4 border-t-4 border-transparent border-t-gray-900"></div>
+                    </div>
+                  </div>
+                );
+              })}
             </div>
           </div>
         )}

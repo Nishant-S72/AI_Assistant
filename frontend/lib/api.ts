@@ -15,13 +15,21 @@ async function fetchApi<T>(
   options?: RequestInit
 ): Promise<T> {
   try {
+    // Add longer timeout for slow endpoints (contact summary takes ~30-60 seconds)
+    const timeout = endpoint.includes('/summary') ? 120000 : 60000; // 120s for summaries, 60s for others
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeout);
+    
     const response = await fetch(`${API_BASE}${endpoint}`, {
       ...options,
+      signal: controller.signal,
       headers: {
         'Content-Type': 'application/json',
         ...options?.headers,
       },
     });
+    
+    clearTimeout(timeoutId);
 
     if (!response.ok) {
       const error: ApiError = await response.json().catch(() => ({
@@ -32,6 +40,9 @@ async function fetchApi<T>(
 
     return response.json();
   } catch (error: any) {
+    if (error instanceof Error && error.name === 'AbortError') {
+      throw new Error('Request timed out - the summary is taking longer than expected. Please try again.');
+    }
     if (error instanceof Error) {
       throw error;
     }
@@ -136,10 +147,14 @@ export interface Task {
 }
 
 export interface HealthLocal {
-  ollama_status: string;
-  models: string[];
-  dummy_threads_loaded: number;
-  mode: 'offline' | 'online';
+  llm?: string;
+  model?: string;
+  status?: string;
+  database?: string;
+  vectorstore?: {
+    status: string;
+    count_chunks?: number;
+  };
 }
 
 export interface CalendarEvent {
@@ -259,7 +274,7 @@ export const api = {
 
   // Health
   getHealthLocal: async (): Promise<HealthLocal> => {
-    return fetchApi<HealthLocal>('/api/health/local');
+    return fetchApi<HealthLocal>('/api/health');
   },
 
   // Calendar
@@ -315,6 +330,8 @@ export interface SummaryResponse {
     unread: number;
     leads: number;
     complaints: number;
+    urgent?: number;
+    highPriority?: number;
   };
   tasks: {
     counts: { P0: number; P1: number; P2: number };

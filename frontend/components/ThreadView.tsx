@@ -65,12 +65,27 @@ export default function ThreadView({ messageId }: ThreadViewProps) {
 
   const { thread, contact, suggestion } = threadData;
 
+  // Handle case where contact might be undefined
+  if (!contact) {
+    return (
+      <div className="flex flex-col items-center justify-center h-full gap-4">
+        <div className="text-red-600 dark:text-red-400">Contact information not available</div>
+        <button
+          onClick={loadThread}
+          className="px-4 py-2 bg-primary-500 text-white rounded-lg hover:bg-primary-600"
+        >
+          Retry
+        </button>
+      </div>
+    );
+  }
+
   return (
     <div className="flex flex-col h-full">
       {/* Thread Header */}
       <div className="p-6 border-b border-[var(--glass-border)] bg-white/50 backdrop-blur-sm">
         <h2 className="text-xl font-semibold text-gray-900 mb-1">
-          {contact.name}
+          {contact.name || 'Unknown Contact'}
         </h2>
         {contact.company && (
           <p className="text-sm text-[var(--muted)]">{contact.company}</p>
@@ -100,7 +115,7 @@ export default function ThreadView({ messageId }: ThreadViewProps) {
                 )}
               >
                 <div className="text-sm mb-1 opacity-80">
-                  {msg.sender === 'assistant' ? 'You' : contact.name}
+                  {msg.sender === 'assistant' ? 'You' : (contact?.name || 'Contact')}
                 </div>
                 <div className="whitespace-pre-wrap">{msg.body}</div>
                 <div className="text-xs mt-2 opacity-70">

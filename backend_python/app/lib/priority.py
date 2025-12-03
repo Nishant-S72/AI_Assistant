@@ -28,11 +28,20 @@ def compute_priority(context: Dict[str, Any]) -> str:
         except Exception:
             pass
 
+    # P0: Infer from contact tags (urgent-action-required, escalation) or urgent keywords
+    urgent_tags = ["urgent-action-required", "escalation"]
+    if any(tag.lower() in [t.lower() for t in contact_tags] for tag in urgent_tags):
+        return "P0"
+    
     urgent_keywords = ["urgent", "asap", "immediately", "critical", "emergency"]
     if any(keyword in title or keyword in message_body for keyword in urgent_keywords):
         return "P0"
 
-    # P1: High-value contacts or important keywords
+    # P1: Infer from contact tags (high-priority) or high-value contacts
+    high_priority_tags = ["high-priority"]
+    if any(tag.lower() in [t.lower() for t in contact_tags] for tag in high_priority_tags):
+        return "P1"
+    
     high_value_tags = ["vip", "enterprise", "high value", "key account"]
     if any(tag.lower() in [t.lower() for t in contact_tags] for tag in high_value_tags):
         return "P1"
@@ -44,11 +53,11 @@ def compute_priority(context: Dict[str, Any]) -> str:
     if any(keyword in title or keyword in message_body for keyword in important_keywords):
         return "P1"
 
-    # P2: Has due date or lead tags
+    # P2: Has due date or lead tags (new-lead, potential-interest)
     if due_at:
         return "P2"
 
-    lead_tags = ["lead", "prospect", "potential"]
+    lead_tags = ["new-lead", "potential-interest", "lead", "prospect", "potential"]
     if any(tag.lower() in [t.lower() for t in contact_tags] for tag in lead_tags):
         return "P2"
 

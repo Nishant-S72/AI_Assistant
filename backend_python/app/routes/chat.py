@@ -8,6 +8,7 @@ from app.clients.llm import generate_chat_completion, LLMMessage, LLMRequestOpti
 from app.policy.policy_engine import check_policy
 from app.policy.intent_classifier import classify_intent_async, INTENT_RULES_CONFIDENCE_THRESHOLD
 from app.db.connection import get_pool
+from app.services.conversation_context import get_context_manager
 from pathlib import Path
 import os
 import uuid
@@ -16,6 +17,52 @@ import gzip
 from datetime import datetime
 
 router = APIRouter()
+
+
+async def _load_conversation_history(thread_id: Optional[str]) -> List[Dict[str, str]]:
+    """Load conversation history for a thread from database."""
+    if not thread_id:
+        return []
+    
+    try:
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            # Try to load from events table (where chat messages are logged)
+            # Look for thread_id in payload JSON
+            rows = await conn.fetch("""
+                SELECT payload::text as payload, final_text, type, created_at
+                FROM events
+                WHERE type IN ('chat_general', 'rag_chat', 'action_calendar_created')
+                  AND payload::jsonb ? 'thread_id'
+                  AND payload::jsonb->>'thread_id' = $1
+                ORDER BY created_at ASC
+                LIMIT 20
+            """, thread_id)
+            
+            history = []
+            for row in rows:
+                payload = json.loads(row['payload']) if row['payload'] else {}
+                user_message = payload.get('user_message', '') or payload.get('userMessage', '')
+                if user_message:
+                    history.append({
+                        "role": "user",
+                        "content": user_message,
+                    })
+                
+                # Add assistant response
+                if row['final_text']:
+                    history.append({
+                        "role": "assistant",
+                        "content": row['final_text'],
+                    })
+            
+            print(f"[Chat] Loaded {len(history)} messages from history for thread {thread_id}")
+            return history
+    except Exception as e:
+        print(f"[Chat] Error loading conversation history: {e}")
+        import traceback
+        traceback.print_exc()
+        return []
 
 
 class ChatRequest(BaseModel):
@@ -56,56 +103,41 @@ async def chat(request: ChatRequest):
         if not user_message or not isinstance(user_message, str):
             raise HTTPException(status_code=400, detail="userMessage or question is required")
 
-        # If using new API format (userMessage), use intent-based routing
+        # If using new API format (userMessage), use intent-based routing with LangGraph context
         if request.userMessage:
-            # CRITICAL: Check policy escalation BEFORE intent classification
-            # This ensures sensitive content is escalated even if it matches policy/action patterns
-            policy_check = check_policy(request.userMessage)
-            if policy_check["action"] == "ESCALATE":
-                # Escalate immediately - do not process further
-                correlation_id = str(uuid.uuid4())
-                escalation_reasons = [r["reason"] for r in policy_check.get("reasons", [])]
-                
-                # Log escalation to audit
-                try:
-                    pool = await get_pool()
-                    async with pool.acquire() as conn:
-                        await conn.execute(
-                            """
-                            INSERT INTO events (type, correlation_id, raw_model_response, final_text, latency_ms, payload)
-                            VALUES ($1, $2, $3, $4, $5, $6)
-                            """,
-                            "chat_escalated",
-                            correlation_id,
-                            "ESCALATED",
-                            "This request requires human review due to sensitive content.",
-                            0,
-                            json.dumps({
-                                "user_message": request.userMessage[:200],
-                                "escalation_reasons": escalation_reasons,
-                                "escalated": True,
-                            }),
-                        )
-                except Exception as e:
-                    print(f"[Chat] Failed to log escalation: {e}")
-                
-                return {
-                    "kind": "policy",
-                    "text": f"This request requires human review due to sensitive content. I'm escalating this to a human reviewer. Reason: {', '.join(escalation_reasons[:2])}",
-                    "citations": [],
-                    "suggestionId": None,
-                    "intent": "policy_intent",  # Default intent for escalated messages
-                    "intent_confidence": 1.0,
-                    "escalated": True,
-                    "reasons": escalation_reasons
-                }
+            # NOTE: This is an onboard RAG bot with NO human backup
+            # Policy questions should be answered via RAG, not escalated
             
-            # Classify intent (after escalation check passes)
-            intent_result = await classify_intent_async(request.userMessage)
+            # Load conversation history for context
+            conversation_history = await _load_conversation_history(request.threadId)
+            
+            # Use LangGraph to process query with context
+            context_manager = get_context_manager()
+            context_result = await context_manager.process_query(
+                user_message=request.userMessage,
+                thread_id=request.threadId,
+                conversation_history=conversation_history,
+            )
+            
+            # Use combined query from context (e.g., "culture of India" instead of just "about the culture")
+            combined_query = context_result.get("combined_query", request.userMessage)
+            extracted_entities = context_result.get("extracted_entities", {})
+            
+            print(f"[Chat] Original: {request.userMessage}")
+            print(f"[Chat] Combined: {combined_query}")
+            print(f"[Chat] Entities: {extracted_entities}")
+            
+            # Classify intent using combined query for better accuracy
+            intent_result = await classify_intent_async(combined_query)
             intent = intent_result["intent"]
             confidence = intent_result.get("confidence", 0.7)
             intent_method = intent_result.get("method", "rules")
             intent_reasons = intent_result.get("reasons", [])
+            
+            # Override intent if context suggests policy intent (countries mentioned)
+            if extracted_entities.get("countries"):
+                intent = "policy_intent"
+                print(f"[Chat] Overriding intent to policy_intent (countries detected: {extracted_entities.get('countries')})")
             
             print(f"[Chat] Intent: {intent} (confidence: {confidence:.2f}, method: {intent_method})")
             
@@ -114,10 +146,10 @@ async def chat(request: ChatRequest):
             
             # Route based on intent
             if intent == "policy_intent":
-                # Use RAG endpoint for policy questions
+                # Use RAG endpoint for policy questions (with combined query)
                 rag_request = RAGChatRequest(
                     threadId=request.threadId,
-                    userMessage=request.userMessage,
+                    userMessage=combined_query,  # Use combined query for better RAG retrieval
                     tone=request.tone,
                     rag=True,
                 )
@@ -127,11 +159,11 @@ async def chat(request: ChatRequest):
                     response["needs_manual_label"] = True
                 return response
             elif intent == "action_intent":
-                # Route to action handler
+                # Route to action handler (use original message for action parsing)
                 return await handle_action_intent(request.userMessage, request.threadId, request.tone, intent_result)
             else:
-                # general_intent - use conversational assistant
-                response = await handle_general_intent(request.userMessage, request.threadId, request.tone)
+                # general_intent - use conversational assistant (with combined query for context)
+                response = await handle_general_intent(combined_query, request.threadId, request.tone)
                 # Add needs_manual_label if applicable
                 if needs_manual_label:
                     response["needs_manual_label"] = True
@@ -148,7 +180,7 @@ async def chat(request: ChatRequest):
 
             return {
                 "answer": result["answer"],
-                "model": __import__("os").getenv("LLM_MODEL") or "tinyllama",
+                "model": __import__("os").getenv("OPENAI_MODEL") or __import__("os").getenv("LLM_MODEL", "gpt-4o-mini"),
                 "calendarEvent": result.get("calendarEvent"),
                 "sessionId": result.get("sessionId", agent_session_id),
             }
@@ -157,7 +189,7 @@ async def chat(request: ChatRequest):
             # Fallback to simple response
             return {
                 "answer": "I'm having trouble processing that request. Please try again.",
-                "model": __import__("os").getenv("LLM_MODEL") or "tinyllama",
+                "model": __import__("os").getenv("OPENAI_MODEL") or __import__("os").getenv("LLM_MODEL", "gpt-4o-mini"),
                 "sessionId": request.sessionId,
             }
     except HTTPException:
@@ -186,7 +218,27 @@ async def rag_chat(request: RAGChatRequest):
         
         if request.rag:
             try:
-                retrieved_chunks = await query_vectorstore(request.userMessage, k=3)
+                retrieved_chunks = await query_vectorstore(request.userMessage, k=5)  # Get more chunks for filtering
+                
+                # GUARDRAIL 1: Filter chunks by similarity threshold (0.3 = 30% similarity minimum)
+                SIMILARITY_THRESHOLD = 0.3
+                filtered_chunks = [chunk for chunk in retrieved_chunks if chunk.score >= SIMILARITY_THRESHOLD]
+                
+                if len(filtered_chunks) == 0 and len(retrieved_chunks) > 0:
+                    # Low relevance - ask for clarification
+                    print(f"[RAG] Low relevance chunks (max score: {max(c.score for c in retrieved_chunks):.2f} < {SIMILARITY_THRESHOLD})")
+                    return {
+                        "kind": "policy",
+                        "text": "I'm not entirely sure what you're looking for. Could you clarify your question? For example:\n- Are you asking about a specific country, policy, or topic?\n- What specific information would be most helpful?",
+                        "citations": [],
+                        "suggestionId": str(uuid.uuid4()),
+                        "intent": "policy_intent",
+                        "intent_confidence": 0.5,
+                        "escalated": False,
+                        "needs_clarification": True,
+                    }
+                
+                retrieved_chunks = filtered_chunks[:3]  # Use top 3 after filtering
                 
                 # If no chunks returned, check if vectorstore is empty
                 if len(retrieved_chunks) == 0:
@@ -226,27 +278,52 @@ async def rag_chat(request: RAGChatRequest):
         if prompt_template_path.exists():
             template = prompt_template_path.read_text(encoding="utf-8")
         else:
-            # Fallback template
-            template = """You are Soraya, an AI assistant. Answer questions concisely.
-            
-Policy Context:
+            # Fallback template - optimized for RAG with knowledge base
+            template = """You are Soraya, an AI assistant helping users with questions about countries, policies, and general knowledge.
+
+**CRITICAL**: The documents below contain relevant information from the knowledge base. You MUST use them to answer the question.
+
+Knowledge Base Documents:
 {retrieved_chunks}
 
-Conversation:
-{conversation}
+Instructions:
+- **MANDATORY**: Answer using the information from the documents provided above
+- **MANDATORY**: If documents are provided, you MUST use them - do NOT say you don't have the information
+- Be concise and accurate
+- Use a {tone} tone
+- Cite sources using format: (Policy §1), (Policy §2), etc. for each document section used
 
-User: {user_message}
-Assistant:"""
+User Question: {user_message}
+
+Assistant Response:"""
         
-        # Format retrieved chunks
+        # Format retrieved chunks - include full text for better context
         chunks_text = ""
+        max_score = 0.0
         if retrieved_chunks:
+            max_score = max(chunk.score for chunk in retrieved_chunks)
             chunks_text = "\n\n".join([
-                f"§{i+1}. {chunk.text[:200]}... (ID: {chunk.id}, Score: {chunk.score:.2f})"
+                f"--- Policy Document Section {i+1} (Relevance: {chunk.score:.2f}) ---\n{chunk.text}"
                 for i, chunk in enumerate(retrieved_chunks)
             ])
         else:
-            chunks_text = "No relevant policy chunks found."
+            chunks_text = "No relevant policy chunks found in the knowledge base."
+        
+        # GUARDRAIL 2: Check if top chunk has sufficient relevance
+        LOW_RELEVANCE_THRESHOLD = 0.4
+        if max_score < LOW_RELEVANCE_THRESHOLD and len(retrieved_chunks) > 0:
+            # Low confidence - ask clarifying question
+            print(f"[RAG] Low relevance detected (max score: {max_score:.2f} < {LOW_RELEVANCE_THRESHOLD})")
+            return {
+                "kind": "policy",
+                "text": "I found some information, but I want to make sure I'm answering the right question. Could you help me clarify:\n- What specific aspect are you most interested in?\n- Is there a particular country, policy section, or topic you'd like to know about?",
+                "citations": [{"id": chunk.id, "score": chunk.score, "textSnippet": chunk.text[:150]} for chunk in retrieved_chunks[:2]],
+                "suggestionId": str(uuid.uuid4()),
+                "intent": "policy_intent",
+                "intent_confidence": max_score,
+                "escalated": False,
+                "needs_clarification": True,
+            }
         
         # Format conversation history
         conversation_text = "No previous messages."
@@ -263,9 +340,23 @@ Assistant:"""
             user_message=request.userMessage
         )
         
-        # Truncate prompt if too long (keep last 4000 chars)
-        if len(system_prompt) > 4000:
-            system_prompt = system_prompt[-4000:]
+        # Truncate prompt if too long, but preserve chunks (they're most important)
+        # If too long, truncate the template part but keep all chunks
+        MAX_PROMPT_LENGTH = 8000  # Increased to accommodate chunks
+        if len(system_prompt) > MAX_PROMPT_LENGTH:
+            # Find where chunks start
+            chunks_start = system_prompt.find("--- Policy Document Section")
+            if chunks_start > 0:
+                # Keep template header (first 2000 chars) and all chunks
+                template_part = system_prompt[:chunks_start]
+                chunks_part = system_prompt[chunks_start:]
+                # Truncate template if needed, but keep all chunks
+                if len(template_part) > 2000:
+                    template_part = template_part[:2000]
+                system_prompt = template_part + chunks_part
+            else:
+                # Fallback: keep last MAX_PROMPT_LENGTH chars
+                system_prompt = system_prompt[-MAX_PROMPT_LENGTH:]
         
         # Save prompt snapshot (truncated)
         prompt_snapshot = system_prompt[:4000]
@@ -286,25 +377,45 @@ Assistant:"""
         
         # Call LLM
         try:
-            # Optimize for speed: reduce max_tokens and temperature for Gemini
-            max_tokens = 200  # Reduced for faster responses
-            temperature = 0.3  # Lower temperature for faster, more deterministic responses
+            # Optimize for OpenAI: balanced tokens and temperature for quality responses
+            max_tokens = 250  # Allow enough tokens for complete answers with citations
+            temperature = 0.2  # Lower temperature for more accurate, deterministic policy responses
+            
+            # GUARDRAIL: Add instruction to check relevance and ask for clarification if needed
+            relevance_warning = ""
+            if retrieved_chunks:
+                top_score = max(chunk.score for chunk in retrieved_chunks)
+                if top_score < 0.5:
+                    relevance_warning = f"\n\nIMPORTANT: The retrieved documents have low relevance (top score: {top_score:.2f}). If the question is ambiguous or you're uncertain, ask for clarification instead of guessing."
+            
+            enhanced_system_prompt = system_prompt + relevance_warning
             
             llm_response = await generate_chat_completion(
                 LLMRequestOptions(
-                    model=os.getenv("GEMINI_MODEL") or os.getenv("LLM_MODEL", "gemini-2.5-flash"),
+                    model=os.getenv("OPENAI_MODEL") or os.getenv("LLM_MODEL", "gpt-4o-mini"),
                     messages=[
-                        LLMMessage("system", system_prompt),
+                        LLMMessage("system", enhanced_system_prompt),
                         LLMMessage("user", request.userMessage),
                     ],
                     max_tokens=max_tokens,
                     temperature=temperature,
-                    use_local=False,  # Skip Ollama when using Gemini
+                    use_local=False,  # Skip Ollama when using OpenAI
                     correlation_id=correlation_id,
                 )
             )
             
             reply = llm_response.content.strip()
+            
+            # GUARDRAIL: Post-process response to check for hallucination indicators
+            # If response doesn't contain citations but makes factual claims, check if it should
+            has_citation = "(Policy" in reply or "Policy §" in reply
+            says_no_info = "don't have" in reply.lower() or "not in the" in reply.lower() or "not available" in reply.lower()
+            
+            # If LLM says it doesn't have info but we have relevant chunks, that's a problem
+            if says_no_info and retrieved_chunks and max(c.score for c in retrieved_chunks) > 0.4:
+                # LLM incorrectly said it doesn't have info - this shouldn't happen with good chunks
+                print(f"[RAG] Warning: LLM said no info but we have relevant chunks (top score: {max(c.score for c in retrieved_chunks):.2f})")
+                # Don't modify reply - let it stand, but log the issue
             latency_ms = int((datetime.now() - start_time).total_seconds() * 1000)
             
             # Save to audit table
@@ -338,6 +449,7 @@ Assistant:"""
                         json.dumps({
                             "intent": "policy_intent",
                             "user_message": request.userMessage[:200],
+                            "thread_id": request.threadId,
                             "citations_count": len(retrieved_chunks),
                             "retrieved_ids": [chunk.id for chunk in retrieved_chunks],
                         }),
@@ -394,28 +506,30 @@ async def handle_action_intent(user_message: str, thread_id: Optional[str], tone
             # Create event in database
             pool = await get_pool()
             async with pool.acquire() as conn:
-                # Insert into calendar_events table
+                # Insert into calendar_events table (match schema from calendar.py)
+                from datetime import datetime as dt
+                start_dt = dt.fromisoformat(event_data["start_time"].replace("Z", "+00:00"))
+                end_dt = dt.fromisoformat(event_data["end_time"].replace("Z", "+00:00"))
+                
                 event_row = await conn.fetchrow(
                     """
                     INSERT INTO calendar_events (
                         title, description, start_time, end_time,
                         is_recurring, recurrence_pattern, recurrence_interval,
-                        location, attendees, source, created_by
+                        location, attendees
                     )
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
                     RETURNING id, title, start_time, end_time, is_recurring, recurrence_pattern
                     """,
                     event_data.get("title"),
                     event_data.get("description"),
-                    event_data.get("start_time"),
-                    event_data.get("end_time"),
+                    start_dt,
+                    end_dt,
                     event_data.get("is_recurring", False),
                     event_data.get("recurrence_pattern"),
                     event_data.get("recurrence_interval", 1),
                     event_data.get("location"),
                     json.dumps(event_data.get("attendees", [])),
-                    "simulated",
-                    "chat_assistant",
                 )
             
             event_id = str(event_row["id"])
@@ -530,33 +644,49 @@ async def handle_general_intent(user_message: str, thread_id: Optional[str], ton
     else:
         # For other questions, use LLM with conversational prompt
         if is_greeting:
-            # Very simple, direct prompt for greetings
-            system_prompt = "You are Soraya. The user greeted you. Greet them back warmly in 1-2 sentences. Just say hello and offer help."
+            # Simple, warm greeting prompt optimized for OpenAI
+            system_prompt = "You are Soraya, a friendly AI assistant. Greet the user warmly in 1-2 sentences and offer to help with their inbox, tasks, or questions."
         else:
-            # For other questions, be conversational but direct
-            system_prompt = f"""You are Soraya, a helpful AI assistant.
+            # For other questions, be conversational but direct - optimized for OpenAI
+            system_prompt = f"""You are Soraya, a helpful AI assistant for managing inbox, tasks, and calendar.
 
 {context}
 
-Answer the user's question directly and helpfully. Keep it under 200 words. Be conversational and friendly."""
+Instructions:
+- Answer directly and concisely (under 150 words)
+- Be friendly and conversational
+- If asked about inbox/tasks, provide helpful context
+- If you don't know something, say so honestly
+- Keep responses natural and human-like"""
         
-        # Call LLM with conversational settings (optimized for Gemini speed)
-        temperature = float(os.getenv("LLM_GENERAL_TEMP", "0.3"))
-        llm_response = await generate_chat_completion(
-            LLMRequestOptions(
-                model=os.getenv("GEMINI_MODEL") or os.getenv("LLM_MODEL", "gemini-2.5-flash"),
-                messages=[
-                    LLMMessage("system", system_prompt),
-                    LLMMessage("user", user_message),
-                ],
-                max_tokens=150,  # Reduced for faster responses
-                temperature=temperature,
-                use_local=False,  # Skip Ollama when using Gemini
-                correlation_id=correlation_id,
-            )
-        )
-        
-        text = llm_response.content.strip()
+            # Call LLM with conversational settings (optimized for OpenAI speed)
+            temperature = float(os.getenv("LLM_GENERAL_TEMP", "0.3"))
+            
+            # GUARDRAIL: Check if query is ambiguous
+            is_ambiguous = any([
+                len(user_message.split()) <= 3,
+                user_message.lower().strip() in ["what about it?", "tell me about it", "what about that?", "and?", "more?"],
+                user_message.lower().startswith("what about") and len(user_message.split()) <= 4,
+            ])
+            
+            if is_ambiguous:
+                text = "I want to make sure I understand correctly. Could you clarify what specific information you're looking for? For example, are you asking about a particular country, topic, or policy?"
+            else:
+                llm_response = await generate_chat_completion(
+                    LLMRequestOptions(
+                        model=os.getenv("OPENAI_MODEL") or os.getenv("LLM_MODEL", "gpt-4o-mini"),
+                        messages=[
+                            LLMMessage("system", system_prompt),
+                            LLMMessage("user", user_message),
+                        ],
+                        max_tokens=150,  # Reduced for faster responses
+                        temperature=temperature,
+                        use_local=False,  # Skip Ollama when using OpenAI
+                        correlation_id=correlation_id,
+                    )
+                )
+                
+                text = llm_response.content.strip()
     
     latency_ms = int((datetime.now() - start_time).total_seconds() * 1000)
     suggestion_id = str(uuid.uuid4())
@@ -578,6 +708,7 @@ Answer the user's question directly and helpfully. Keep it under 200 words. Be c
                 json.dumps({
                     "intent": "general_intent",
                     "user_message": user_message[:200],
+                    "thread_id": thread_id,
                 }),
             )
     except Exception as e:

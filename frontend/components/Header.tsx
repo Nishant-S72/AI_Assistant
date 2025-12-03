@@ -22,7 +22,8 @@ export default function Header() {
   const checkSimulatedMode = async () => {
     try {
       const health = await api.getHealthLocal();
-      setIsSimulated(health.mode === 'offline');
+      // Check if we're in offline mode based on LLM status
+      setIsSimulated(health.llm !== 'openai_configured' && health.status !== 'ok');
     } catch {
       setIsSimulated(false);
     }

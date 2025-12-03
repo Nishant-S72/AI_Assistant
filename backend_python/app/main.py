@@ -27,6 +27,12 @@ async def lifespan(app: FastAPI):
     # Startup
     await init_database()
     
+    # Force reload vector store on startup
+    from app.clients.vectorstore.json_adapter import _json_store
+    print(f"[Startup] Reloading vector store from: {_json_store.file_path}")
+    _json_store.load()
+    print(f"[Startup] Loaded {len(_json_store.vectors)} vectors on startup")
+    
     # Start background cleanup task for agentic chat
     from app.agents import agentic_chat
     import asyncio

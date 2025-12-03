@@ -42,8 +42,11 @@ async def list_contacts(
             params.append(f"%{search}%")
 
         if tag:
-            conditions.append("c.tags::text LIKE $2")
-            params.append(f'%"{tag}"%')
+            # Handle JSON array format - tags are stored as JSONB arrays
+            # Match both with and without quotes
+            param_index = len(params) + 1
+            conditions.append(f"c.tags::text LIKE ${param_index}")
+            params.append(f'%"{tag}"%')  # JSON array format: ["tag"]
 
         if conditions:
             query += f" WHERE {' AND '.join(conditions)}"
@@ -111,6 +114,22 @@ async def get_contact(contact_id: str):
     except Exception as error:
         print(f"Error fetching contact: {error}")
         raise HTTPException(status_code=500, detail="Failed to fetch contact")
+
+
+@router.post("/{contact_id}/update-tags")
+async def update_contact_tags_endpoint(contact_id: str):
+    """Update contact tags based on AI analysis of chat history."""
+    try:
+        from app.services.contact_tags import update_contact_tags
+        tags = await update_contact_tags(contact_id)
+        return {
+            "success": True,
+            "contact_id": contact_id,
+            "tags": tags
+        }
+    except Exception as error:
+        print(f"Error updating contact tags: {error}")
+        raise HTTPException(status_code=500, detail=f"Failed to update tags: {str(error)}")
 
 
 @router.get("/{contact_id}/messages")
@@ -184,12 +203,49 @@ async def get_contact_summary(contact_id: str):
                 """,
                 contact_id,
             )
+            
+            # Auto-update tags if they're missing or outdated (no tags or only "new" tag)
+            current_tags = tags if isinstance(tags, list) else []
+            should_update_tags = (
+                not current_tags or 
+                current_tags == ["new"] or 
+                len(current_tags) == 0
+            )
+            
+            if should_update_tags and len(messages) > 0:
+                # Update tags in background (don't wait for it)
+                try:
+                    from app.services.contact_tags import update_contact_tags
+                    import asyncio
+                    # Run tag update in background
+                    asyncio.create_task(update_contact_tags(contact_id, pool))
+                except Exception as e:
+                    print(f"[Summary] Failed to trigger tag update: {e}")
 
             if not messages:
+                # Still return task stats and message count even if no messages
+                task_stats_row = await conn.fetchrow(
+                    """
+                    SELECT 
+                        COUNT(*) as total,
+                        COUNT(*) FILTER (WHERE status = 'pending') as pending,
+                        COUNT(*) FILTER (WHERE status = 'completed') as completed
+                    FROM tasks
+                    WHERE contact_id = $1
+                    """,
+                    contact_id,
+                )
+                task_stats = {
+                    "total": int(task_stats_row["total"]) if task_stats_row else 0,
+                    "pending": int(task_stats_row["pending"]) if task_stats_row else 0,
+                    "completed": int(task_stats_row["completed"]) if task_stats_row else 0,
+                }
                 return {
                     "summary": "No interaction history available.",
                     "recommendations": [],
-                    "conversation_summaries": [],
+                    "recentConversations": [],
+                    "messageCount": 0,
+                    "taskStats": task_stats,
                 }
 
             # Build email history
@@ -197,7 +253,8 @@ async def get_contact_summary(contact_id: str):
             for msg in messages:
                 email_history.append(f"[{msg['sender']}] {msg['body']}")
 
-            simple_email_history = "\n\n".join(email_history[-50:])  # Last 50 messages
+            # Use all email history - no limits
+            simple_email_history = "\n\n".join(email_history)  # All messages
 
             # Generate summary using LLM
             summary_prompt = f"""You are analyzing the email history with {contact['name']}{f' from {contact["company"]}' if contact.get('company') else ''}.
@@ -212,29 +269,6 @@ Write a natural, insightful summary of this relationship. Focus on:
 
 Be conversational and humane. Do NOT use a rigid structure. Write naturally as if you're explaining this to a colleague. Keep it under 250 words."""
 
-            try:
-                llm_response = await generate_chat_completion(
-                    LLMRequestOptions(
-                        model=os.getenv("LLM_MODEL") or os.getenv("OPENAI_MODEL") or "tinyllama",
-                        messages=[
-                            LLMMessage("system", "You are a helpful assistant analyzing customer relationships."),
-                            LLMMessage("user", summary_prompt),
-                        ],
-                        temperature=0.7,
-                        max_tokens=200,
-                        use_local=os.getenv("USE_OLLAMA") != "false",
-                    )
-                )
-
-                summary_text = llm_response.content.strip()
-            except Exception as llm_error:
-                print(f"LLM error generating summary: {llm_error}")
-                return {
-                    "summary": f"Failed to generate summary. Please ensure Ollama is running and {os.getenv('LLM_MODEL', 'tinyllama')} model is installed.",
-                    "recommendations": [],
-                    "conversation_summaries": [],
-                }
-
             # Generate recommendations
             recommendations_prompt = f"""Based on this email history with {contact['name']}:
 
@@ -242,31 +276,109 @@ Be conversational and humane. Do NOT use a rigid structure. Write naturally as i
 
 Provide 2-3 actionable recommendations. Be specific and practical. Keep each recommendation under 50 words."""
 
-            try:
-                rec_response = await generate_chat_completion(
-                    LLMRequestOptions(
-                        model=os.getenv("LLM_MODEL") or os.getenv("OPENAI_MODEL") or "tinyllama",
-                        messages=[
-                            LLMMessage("system", "You are a helpful assistant providing actionable recommendations."),
-                            LLMMessage("user", recommendations_prompt),
-                        ],
-                        temperature=0.7,
-                        max_tokens=150,
-                        use_local=os.getenv("USE_OLLAMA") != "false",
+            # Make LLM calls in parallel for speed
+            import asyncio
+            
+            async def generate_summary():
+                try:
+                    llm_response = await generate_chat_completion(
+                        LLMRequestOptions(
+                            model=os.getenv("OPENAI_MODEL") or os.getenv("LLM_MODEL", "gpt-4o-mini"),
+                            messages=[
+                                LLMMessage("system", "You are a helpful assistant analyzing customer relationships."),
+                                LLMMessage("user", summary_prompt),
+                            ],
+                            temperature=0.7,
+                            max_tokens=None,  # No token limit
+                        )
                     )
-                )
+                    return llm_response.content.strip()
+                except Exception as e:
+                    import traceback
+                    print(f"Summary generation error: {e}")
+                    traceback.print_exc()
+                    return None
 
-                recommendations_text = rec_response.content.strip()
-                # Parse recommendations (simple split by newlines or bullets)
-                recommendations = [
-                    r.strip()
-                    for r in recommendations_text.replace("•", "\n").replace("-", "\n").split("\n")
-                    if r.strip() and len(r.strip()) > 10
-                ][:3]
-            except Exception:
+            async def generate_recommendations():
+                try:
+                    rec_response = await generate_chat_completion(
+                        LLMRequestOptions(
+                            model=os.getenv("OPENAI_MODEL") or os.getenv("LLM_MODEL", "gpt-4o-mini"),
+                            messages=[
+                                LLMMessage("system", "You are a helpful assistant providing actionable recommendations."),
+                                LLMMessage("user", recommendations_prompt),
+                            ],
+                            temperature=0.7,
+                            max_tokens=None,  # No token limit
+                        )
+                    )
+                    rec_text = rec_response.content.strip()
+                    # Parse recommendations
+                    recommendations = [
+                        r.strip()
+                        for r in rec_text.replace("•", "\n").replace("-", "\n").split("\n")
+                        if r.strip() and len(r.strip()) > 10
+                    ][:3]
+                    return recommendations
+                except Exception as e:
+                    import traceback
+                    print(f"Recommendations generation error: {e}")
+                    traceback.print_exc()
+                    return []
+
+            # Run LLM calls sequentially (one after the other) to avoid rate limits
+            # 1. Generate summary first
+            try:
+                summary_text = await generate_summary()
+            except Exception as e:
+                import traceback
+                print(f"Summary generation error: {e}")
+                traceback.print_exc()
+                summary_text = None
+            
+            # 2. Generate recommendations after summary completes
+            try:
+                recommendations = await generate_recommendations()
+            except Exception as e:
+                import traceback
+                print(f"Recommendations generation error: {e}")
+                traceback.print_exc()
                 recommendations = []
+            
+            if not summary_text:
+                # Fallback error handling - get task stats and return error
+                error_msg = "Summary generation returned None"
+                task_stats_row = await conn.fetchrow(
+                    """
+                    SELECT 
+                        COUNT(*) as total,
+                        COUNT(*) FILTER (WHERE status = 'pending') as pending,
+                        COUNT(*) FILTER (WHERE status = 'completed') as completed
+                    FROM tasks
+                    WHERE contact_id = $1
+                    """,
+                    contact_id,
+                )
+                task_stats = {
+                    "total": int(task_stats_row["total"]) if task_stats_row else 0,
+                    "pending": int(task_stats_row["pending"]) if task_stats_row else 0,
+                    "completed": int(task_stats_row["completed"]) if task_stats_row else 0,
+                }
+                message_count_row = await conn.fetchrow(
+                    "SELECT COUNT(*) as count FROM messages WHERE contact_id = $1",
+                    contact_id
+                )
+                message_count = int(message_count_row["count"]) if message_count_row else 0
+                
+                return {
+                    "summary": "Failed to generate summary. Please try again.",
+                    "recommendations": recommendations if recommendations else [],
+                    "recentConversations": [],
+                    "messageCount": message_count,
+                    "taskStats": task_stats,
+                }
 
-            # Generate conversation summaries for last 3 threads
+            # 3. Generate conversation summaries sequentially (one after the other)
             thread_ids = list(set([msg["thread_id"] for msg in messages]))[-3:]
             conversation_summaries = []
 
@@ -277,24 +389,63 @@ Provide 2-3 actionable recommendations. Be specific and practical. Keep each rec
                 try:
                     conv_response = await generate_chat_completion(
                         LLMRequestOptions(
-                            model=os.getenv("LLM_MODEL") or os.getenv("OPENAI_MODEL") or "tinyllama",
+                            model=os.getenv("OPENAI_MODEL") or os.getenv("LLM_MODEL", "gpt-4o-mini"),
                             messages=[
                                 LLMMessage("system", "Summarize this conversation in 1-2 sentences."),
                                 LLMMessage("user", f"Conversation:\n{thread_text}"),
                             ],
                             temperature=0.7,
-                            max_tokens=80,
-                            use_local=os.getenv("USE_OLLAMA") != "false",
+                            max_tokens=None,  # No token limit
                         )
                     )
                     conversation_summaries.append(conv_response.content.strip())
-                except Exception:
+                except Exception as e:
+                    print(f"Conversation summary error for thread {thread_id}: {e}")
                     pass
+
+            # Get task statistics and message count (reuse connection)
+            task_stats_row = await conn.fetchrow(
+                """
+                SELECT 
+                    COUNT(*) as total,
+                    COUNT(*) FILTER (WHERE status = 'pending') as pending,
+                    COUNT(*) FILTER (WHERE status = 'completed') as completed
+                FROM tasks
+                WHERE contact_id = $1
+                """,
+                contact_id,
+            )
+            
+            task_stats = {
+                "total": int(task_stats_row["total"]) if task_stats_row else 0,
+                "pending": int(task_stats_row["pending"]) if task_stats_row else 0,
+                "completed": int(task_stats_row["completed"]) if task_stats_row else 0,
+            }
+
+            message_count_row = await conn.fetchrow(
+                "SELECT COUNT(*) as count FROM messages WHERE contact_id = $1",
+                contact_id
+            )
+            message_count = int(message_count_row["count"]) if message_count_row else 0
+
+            # Format recent conversations as objects (not just strings)
+            recent_conversations = []
+            for i, thread_id in enumerate(thread_ids):
+                thread_messages = [msg for msg in messages if msg["thread_id"] == thread_id]
+                if thread_messages:
+                    recent_conversations.append({
+                        "thread_id": thread_id,
+                        "summary": conversation_summaries[i] if i < len(conversation_summaries) else "",
+                        "message_count": len(thread_messages),
+                        "last_message_at": thread_messages[-1]["created_at"].isoformat() if thread_messages else None,
+                    })
 
             return {
                 "summary": summary_text,
                 "recommendations": recommendations,
-                "conversation_summaries": conversation_summaries,
+                "recentConversations": recent_conversations,
+                "messageCount": message_count,
+                "taskStats": task_stats,
             }
     except HTTPException:
         raise

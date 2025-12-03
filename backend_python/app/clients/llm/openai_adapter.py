@@ -51,12 +51,18 @@ async def generate_with_openai(options: LLMOptions) -> LLMResponse:
 
     client = AsyncOpenAI(api_key=api_key)
 
-    response = await client.chat.completions.create(
-        model=options.model,
-        messages=[msg.to_dict() for msg in options.messages],
-        max_tokens=options.max_tokens,
-        temperature=options.temperature or 0.7,
-    )
+    # Build request parameters (OpenAI doesn't accept None for max_tokens)
+    request_params = {
+        "model": options.model,
+        "messages": [msg.to_dict() for msg in options.messages],
+        "temperature": options.temperature or 0.7,
+    }
+    
+    # Only include max_tokens if it's explicitly set (not None)
+    if options.max_tokens is not None:
+        request_params["max_tokens"] = options.max_tokens
+    
+    response = await client.chat.completions.create(**request_params)
 
     return LLMResponse(
         content=response.choices[0].message.content or "",

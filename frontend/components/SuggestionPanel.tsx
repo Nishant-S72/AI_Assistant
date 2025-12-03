@@ -32,7 +32,7 @@ export default function SuggestionPanel({
 }: SuggestionPanelProps) {
   const [suggestion, setSuggestion] = useState<Suggestion | null>(initialSuggestion || null);
   const [tone, setTone] = useState<Tone>('warm');
-  const [editedText, setEditedText] = useState('');
+  const [editedText, setEditedText] = useState<string>('');
   const [isGenerating, setIsGenerating] = useState(false);
   const [isSending, setIsSending] = useState(false);
   const [policyEscalated, setPolicyEscalated] = useState(false);
@@ -43,12 +43,51 @@ export default function SuggestionPanel({
   // Cache suggestions by tone
   const suggestionCache = useRef<Map<Tone, Suggestion>>(new Map());
 
+  // Normalize suggestion to ensure all fields are properly set
+  const normalizeSuggestion = (suggestion: Suggestion | null): Suggestion | null => {
+    if (!suggestion) return null;
+    
+    // Ensure retrieved_ids is always an array
+    let retrieved_ids = suggestion.retrieved_ids;
+    if (!Array.isArray(retrieved_ids)) {
+      if (typeof retrieved_ids === 'string') {
+        try {
+          retrieved_ids = JSON.parse(retrieved_ids);
+        } catch {
+          retrieved_ids = [];
+        }
+      } else if (retrieved_ids === null || retrieved_ids === undefined) {
+        retrieved_ids = [];
+      } else {
+        retrieved_ids = [];
+      }
+    }
+    
+    // Ensure prompt is always a string
+    const prompt = suggestion.prompt || '';
+    
+    // Ensure final_text and model_response are strings
+    const final_text = suggestion.final_text || suggestion.model_response || '';
+    const model_response = suggestion.model_response || '';
+    
+    return {
+      ...suggestion,
+      retrieved_ids: retrieved_ids as string[],
+      prompt,
+      final_text,
+      model_response,
+    };
+  };
+
   useEffect(() => {
     if (initialSuggestion) {
-      setSuggestion(initialSuggestion);
-      setEditedText(initialSuggestion.final_text || initialSuggestion.model_response);
-      // Cache the initial suggestion
-      suggestionCache.current.set(tone, initialSuggestion);
+      const normalized = normalizeSuggestion(initialSuggestion);
+      if (normalized) {
+        setSuggestion(normalized);
+        setEditedText(normalized.final_text || normalized.model_response || '');
+        // Cache the normalized suggestion
+        suggestionCache.current.set(tone, normalized);
+      }
     }
   }, [initialSuggestion, tone]);
 
@@ -67,10 +106,13 @@ export default function SuggestionPanel({
       // Check cache first
       const cached = suggestionCache.current.get(tone);
       if (cached) {
-        setSuggestion(cached);
-        setEditedText(cached.final_text || cached.model_response);
-        setPolicyEscalated(cached.prompt?.includes('ESCALATE') || false);
-        onSuggestionGenerated?.(cached);
+        const normalized = normalizeSuggestion(cached);
+        if (normalized) {
+          setSuggestion(normalized);
+          setEditedText(normalized.final_text || normalized.model_response || '');
+          setPolicyEscalated(normalized.prompt?.includes('ESCALATE') || false);
+          onSuggestionGenerated?.(normalized);
+        }
       } else {
         // Generate if not cached
         generateSuggestion(false);
@@ -86,11 +128,14 @@ export default function SuggestionPanel({
     if (!forceRegenerate) {
       const cached = suggestionCache.current.get(tone);
       if (cached) {
-        setSuggestion(cached);
-        setEditedText(cached.final_text || cached.model_response);
-        setPolicyEscalated(cached.prompt?.includes('ESCALATE') || false);
-        onSuggestionGenerated?.(cached);
-        return;
+        const normalized = normalizeSuggestion(cached);
+        if (normalized) {
+          setSuggestion(normalized);
+          setEditedText(normalized.final_text || normalized.model_response || '');
+          setPolicyEscalated(normalized.prompt?.includes('ESCALATE') || false);
+          onSuggestionGenerated?.(normalized);
+          return;
+        }
       }
     }
     
@@ -98,16 +143,48 @@ export default function SuggestionPanel({
     setPolicyEscalated(false);
     try {
       const result = await api.generateSuggestion(messageId, tone);
-      setSuggestion(result.suggestion);
-      setEditedText(result.suggestion.final_text || result.suggestion.model_response);
-      setPolicyEscalated(result.policyCheck.action === 'ESCALATE_TO_HUMAN');
       
-      // Cache the suggestion
-      suggestionCache.current.set(tone, result.suggestion);
+      // The backend returns { suggestion: "text string", policy_check: {...}, id: "...", message_id: "..." }
+      // But the frontend expects { suggestion: Suggestion object, policyCheck: {...} }
+      // Convert the string response to a Suggestion object
+      let suggestionData: Suggestion | null = null;
       
-      onSuggestionGenerated?.(result.suggestion);
-      // Invalidate summary cache since we generated a new suggestion
-      invalidateSummaryCache();
+      if (result.suggestion) {
+        // If suggestion is a string, convert it to a Suggestion object
+        if (typeof result.suggestion === 'string') {
+          suggestionData = {
+            id: (result as any).id || '',
+            message_id: messageId,
+            prompt: '', // Backend doesn't return prompt in this endpoint
+            retrieved_ids: [],
+            model_response: result.suggestion,
+            final_text: result.suggestion,
+            edited: false,
+            created_at: new Date().toISOString(),
+          };
+        } else {
+          // It's already a Suggestion object
+          suggestionData = result.suggestion;
+        }
+      }
+      
+      const newSuggestion = normalizeSuggestion(suggestionData);
+      
+      if (newSuggestion) {
+        setSuggestion(newSuggestion);
+        setEditedText(newSuggestion.final_text || newSuggestion.model_response || '');
+        // Safely check policy escalation - handle both camelCase and snake_case
+        const policyCheck = result?.policyCheck || (result as any)?.policy_check;
+        const policyAction = policyCheck?.action || 'ALLOW';
+        setPolicyEscalated(policyAction === 'ESCALATE_TO_HUMAN' || policyAction === 'ESCALATE');
+        // Cache the normalized suggestion
+        suggestionCache.current.set(tone, newSuggestion);
+        onSuggestionGenerated?.(newSuggestion);
+        // Invalidate summary cache since we generated a new suggestion
+        invalidateSummaryCache();
+      } else {
+        showToast('Failed to generate suggestion: invalid response format', 'error');
+      }
     } catch (error: any) {
       showToast(error.message || 'Failed to generate suggestion', 'error');
     } finally {
@@ -116,7 +193,7 @@ export default function SuggestionPanel({
   };
 
   const sendMessage = async () => {
-    if (!editedText.trim() || policyEscalated) return;
+    if (!editedText || !editedText.trim() || policyEscalated) return;
 
     setIsSending(true);
     try {
@@ -190,8 +267,8 @@ export default function SuggestionPanel({
           </div>
         )}
 
-        {/* Suggestion Textarea */}
-        {suggestion && !isGenerating && (
+        {/* Suggestion Textarea - Always visible */}
+        {!isGenerating && (
           <AnimatePresence>
             <motion.div
               initial={{ opacity: 0, y: 10 }}
@@ -209,7 +286,7 @@ export default function SuggestionPanel({
                   }
                 }}
                 className="w-full h-48 p-4 border border-[var(--glass-border)] rounded-lg bg-white/80 backdrop-blur-sm text-gray-900 resize-none focus:ring-2 focus:ring-[var(--primary)] focus:border-transparent transition-all"
-                placeholder="AI suggestion will appear here..."
+                placeholder={suggestion ? "Edit AI suggestion..." : "Click 'Generate AI Response' to create a reply..."}
                 aria-label="Edit AI suggested reply"
               />
             </motion.div>
@@ -231,7 +308,7 @@ export default function SuggestionPanel({
             <>
               <button
                 onClick={sendMessage}
-                disabled={isSending || policyEscalated || !editedText.trim()}
+                disabled={isSending || policyEscalated || !(editedText?.trim() || '')}
                 className="px-6 py-2.5 bg-[var(--accent)] text-white rounded-lg hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed transition-opacity shadow-sm"
                 aria-label="Send reply"
               >
@@ -241,9 +318,9 @@ export default function SuggestionPanel({
                 onClick={() => generateSuggestion(true)}
                 disabled={isGenerating}
                 className="px-6 py-2.5 bg-[var(--primary)] text-white rounded-lg hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed transition-opacity shadow-sm"
-                aria-label="Regenerate suggestion"
+                aria-label="Generate AI response"
               >
-                {isGenerating ? 'Regenerating...' : 'Regenerate'}
+                {isGenerating ? 'Generating...' : 'Generate AI Response'}
               </button>
               <button
                 onClick={saveDraft}
@@ -279,11 +356,11 @@ export default function SuggestionPanel({
                   Prompt (truncated):
                 </p>
                 <pre className="text-xs text-gray-700 whitespace-pre-wrap break-words max-h-32 overflow-y-auto custom-scrollbar">
-                  {suggestion.prompt.substring(0, 4000)}
-                  {suggestion.prompt.length > 4000 && '...'}
+                  {(suggestion.prompt || '').substring(0, 4000)}
+                  {(suggestion.prompt || '').length > 4000 && '...'}
                 </pre>
               </div>
-              {suggestion.retrieved_ids && suggestion.retrieved_ids.length > 0 && (
+              {suggestion.retrieved_ids && Array.isArray(suggestion.retrieved_ids) && suggestion.retrieved_ids.length > 0 && (
                 <div>
                   <p className="text-xs font-medium text-[var(--muted)] mb-1">
                     Retrieved Sources:

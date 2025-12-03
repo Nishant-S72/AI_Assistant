@@ -3,6 +3,7 @@ from fastapi import APIRouter, HTTPException, Query
 from typing import Optional, List, Dict, Any
 from app.db.connection import get_pool
 from app.clients.llm import generate_chat_completion, LLMMessage, LLMRequestOptions
+from app.clients.vectorstore import query_vectorstore
 from app.policy.policy_engine import check_policy
 import uuid
 import os
@@ -85,46 +86,155 @@ async def get_thread(message_id: str):
     try:
         pool = await get_pool()
         async with pool.acquire() as conn:
-            # Get thread messages
-            thread_query = """
+            # Get the specific message first
+            message_query = """
                 SELECT 
                     m.id,
+                    m.thread_id,
                     m.sender,
                     m.body,
+                    m.channel,
                     m.created_at,
+                    m.contact_id,
+                    c.id as contact_id_full,
                     c.name as contact_name,
                     c.email as contact_email,
                     c.company as contact_company,
                     c.tags as contact_tags,
                     c.tone_pref as contact_tone_pref
                 FROM messages m
-                JOIN contacts c ON m.contact_id = c.id
-                WHERE m.thread_id = (SELECT thread_id FROM messages WHERE id = $1)
+                LEFT JOIN contacts c ON m.contact_id = c.id
+                WHERE m.id = $1
+            """
+            message_row = await conn.fetchrow(message_query, message_id)
+            
+            if not message_row:
+                raise HTTPException(status_code=404, detail="Message not found")
+            
+            message_data = dict(message_row)
+            
+            # Get thread messages
+            thread_id = message_data.get("thread_id")
+            if not thread_id:
+                raise HTTPException(status_code=404, detail="Thread not found")
+            
+            thread_query = """
+                SELECT 
+                    m.id,
+                    m.sender,
+                    m.body,
+                    m.created_at
+                FROM messages m
+                WHERE m.thread_id = $1
                 ORDER BY m.created_at ASC
             """
-            messages = await conn.fetch(thread_query, message_id)
+            thread_messages = await conn.fetch(thread_query, thread_id)
             
-            if not messages:
-                raise HTTPException(status_code=404, detail="Thread not found")
+            # Get contact information (from first message or contact table)
+            contact = None
+            if message_data.get("contact_id"):
+                contact_query = """
+                    SELECT 
+                        id,
+                        name,
+                        email,
+                        company,
+                        tags,
+                        tone_pref
+                    FROM contacts
+                    WHERE id = $1
+                """
+                contact_row = await conn.fetchrow(contact_query, message_data["contact_id"])
+                if contact_row:
+                    # Handle tags - ensure it's always an array
+                    tags = contact_row.get("tags")
+                    if tags is None:
+                        tags = []
+                    elif isinstance(tags, str):
+                        # If it's a JSON string, parse it
+                        try:
+                            import json
+                            tags = json.loads(tags)
+                        except (json.JSONDecodeError, TypeError):
+                            tags = []
+                    elif not isinstance(tags, list):
+                        # If it's not a list, make it one
+                        tags = []
+                    
+                    contact = {
+                        "id": str(contact_row["id"]),
+                        "name": contact_row.get("name") or "Unknown Contact",
+                        "email": contact_row.get("email"),
+                        "company": contact_row.get("company"),
+                        "tags": tags if isinstance(tags, list) else [],
+                        "tone_pref": contact_row.get("tone_pref"),
+                    }
+            
+            # If no contact found, create a default one from message data
+            if not contact:
+                # Handle tags from message data - ensure it's always an array
+                tags = message_data.get("contact_tags")
+                if tags is None:
+                    tags = []
+                elif isinstance(tags, str):
+                    # If it's a JSON string, parse it
+                    try:
+                        import json
+                        tags = json.loads(tags)
+                    except (json.JSONDecodeError, TypeError):
+                        tags = []
+                elif not isinstance(tags, list):
+                    # If it's not a list, make it one
+                    tags = []
+                
+                contact = {
+                    "id": str(message_data.get("contact_id")) or "unknown",
+                    "name": message_data.get("contact_name") or "Unknown Contact",
+                    "email": message_data.get("contact_email"),
+                    "company": message_data.get("contact_company"),
+                    "tags": tags if isinstance(tags, list) else [],
+                    "tone_pref": message_data.get("contact_tone_pref"),
+                }
 
-            # Get latest suggestion if available
-            suggestion_query = """
-                SELECT * FROM suggestions
-                WHERE message_id = $1
-                ORDER BY created_at DESC
-                LIMIT 1
-            """
-            suggestion = await conn.fetchrow(suggestion_query, message_id)
+            # Don't auto-load suggestions - user must explicitly generate them
+            # This prevents default suggestions from appearing when opening threads
+            # Users must click "Generate" button to create a suggestion
+            suggestion = None
+
+            # Format thread messages
+            thread = [
+                {
+                    "id": str(msg["id"]),
+                    "sender": msg["sender"],
+                    "body": msg["body"],
+                    "created_at": msg["created_at"].isoformat() if msg.get("created_at") else None,
+                }
+                for msg in thread_messages
+            ]
+
+            # Format main message
+            message = {
+                "id": str(message_data["id"]),
+                "thread_id": str(message_data["thread_id"]),
+                "sender": message_data["sender"],
+                "body": message_data["body"],
+                "channel": message_data.get("channel"),
+                "created_at": message_data["created_at"].isoformat() if message_data.get("created_at") else None,
+            }
 
             result = {
-                "messages": [dict(msg) for msg in messages],
-                "suggestion": dict(suggestion) if suggestion else None,
+                "message": message,
+                "thread": thread,
+                "suggestion": suggestion,
+                "contact": contact,
             }
             return result
     except HTTPException:
         raise
     except Exception as error:
         print(f"Error fetching thread: {error}")
+        import traceback
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Failed to fetch thread: {str(error)}")
 
 
@@ -167,33 +277,82 @@ async def generate_suggestion(
             customer_messages = [m for m in thread_messages if m["sender"] == "contact"]
             latest_customer_message = customer_messages[-1]["body"] if customer_messages else ""
 
+            # Retrieve relevant policy documents using RAG
+            # Combine the latest message and conversation context for better retrieval
+            query_text = latest_customer_message
+            if len(customer_messages) > 1:
+                # Include context from recent messages
+                recent_context = " ".join([m["body"] for m in customer_messages[-3:]])
+                query_text = f"{recent_context} {latest_customer_message}"
+            
+            print(f"[Suggestion] Querying vector store with: {query_text[:100]}...")
+            retrieved_chunks = await query_vectorstore(query_text, k=3)
+            print(f"[Suggestion] Retrieved {len(retrieved_chunks)} chunks from vector store")
+            
+            # Filter chunks by relevance (similarity threshold)
+            SIMILARITY_THRESHOLD = 0.3
+            filtered_chunks = [chunk for chunk in retrieved_chunks if chunk.score >= SIMILARITY_THRESHOLD]
+            print(f"[Suggestion] {len(filtered_chunks)} chunks passed similarity threshold (>{SIMILARITY_THRESHOLD})")
+            
+            # Build policy context if we have relevant chunks
+            policy_context = ""
+            if filtered_chunks:
+                policy_context = "\n\nRelevant Policy/Knowledge Base Information:\n"
+                for i, chunk in enumerate(filtered_chunks, 1):
+                    policy_context += f"{i}. {chunk.text[:300]}...\n"
+                    if chunk.metadata.get("section"):
+                        policy_context += f"   (Source: {chunk.metadata.get('section', 'Policy Document')})\n"
+                policy_context += "\nIMPORTANT: Use the above policy/knowledge base information to inform your response. Reference specific policies when relevant, but keep the tone natural and conversational.\n"
+                print(f"[Suggestion] Added {len(filtered_chunks)} policy chunks to context")
+            else:
+                print(f"[Suggestion] No relevant policy chunks found (all below threshold or empty)")
+
+            # Get user's name and email for signature
+            user_name = os.getenv("USER_NAME", "Soraya")
+            user_email = os.getenv("USER_EMAIL", "soraya@example.com")
+            
             # Build prompt
             system_prompt = f"""You're helping write a reply to a customer. Talk to them like a real person, not a robot.
 
 Tone: {preferred_tone}
-Contact: {contact_name}{f' from {contact_company}' if contact_company else ''}
+You are replying to: {contact_name}{f' from {contact_company}' if contact_company else ''}
 
 What they've been saying:
 {chr(10).join([f"[{m['sender']}]: {m['body']}" for m in thread_messages])}
+{policy_context}
+CRITICAL SIGNATURE RULES:
+- You MUST sign the email with YOUR name: {user_name}
+- You MUST include YOUR email: {user_email}
+- DO NOT use the recipient's name ({contact_name}) or company ({contact_company or 'N/A'}) in the signature
+- The signature format should be: "Best,\n{user_name}\n{user_email}"
 
-Write a natural, {preferred_tone} reply. No templates, no corporate speak - just respond like you're actually talking to them. Address what they need, be helpful, and keep it real. Keep it under 250 words. Be concise and direct."""
+Write a natural, {preferred_tone} reply. No templates, no corporate speak - just respond like you're actually talking to them. Address what they need, be helpful, and keep it real. Keep it under 250 words. Be concise and direct. Always end with the correct signature using {user_name} and {user_email}."""
 
-            user_prompt = f"Latest message from them:\n{latest_customer_message}\n\nWrite a natural, {preferred_tone} reply."
+            user_prompt = f"Latest message from them:\n{latest_customer_message}\n\nWrite a natural, {preferred_tone} reply. Remember: sign with YOUR name ({user_name}) and email ({user_email}), NOT the recipient's name ({contact_name})."
 
-            # Generate suggestion
+            # Generate suggestion - prioritize OPENAI_MODEL explicitly
+            openai_model = os.getenv("OPENAI_MODEL")
+            if not openai_model:
+                openai_model = os.getenv("LLM_MODEL", "gpt-4o-mini")
+                print(f"[Suggestion] ⚠️ OPENAI_MODEL not set, using LLM_MODEL: {openai_model}")
+            else:
+                print(f"[Suggestion] ✅ Using OPENAI_MODEL: {openai_model}")
+            
             llm_response = await generate_chat_completion(
                 LLMRequestOptions(
-                    model=os.getenv("LLM_MODEL") or os.getenv("OPENAI_MODEL") or "tinyllama",
+                    model=openai_model,
                     messages=[
                         LLMMessage("system", system_prompt),
                         LLMMessage("user", user_prompt),
                     ],
                     temperature=0.5,
                     max_tokens=150,
-                    use_local=os.getenv("USE_OLLAMA") != "false",
+                    use_local=False,  # Skip Ollama when using OpenAI
                     correlation_id=correlation_id or str(uuid.uuid4()),
                 )
             )
+            
+            print(f"[Suggestion] Generated response using adapter: {getattr(llm_response, 'adapter', 'unknown')}, model: {getattr(llm_response, 'model', 'unknown')}")
 
             suggestion_text = llm_response.content.strip()
 
@@ -202,19 +361,40 @@ Write a natural, {preferred_tone} reply. No templates, no corporate speak - just
 
             # Store suggestion
             suggestion_id = str(uuid.uuid4())
+            # Create a prompt snapshot for storage
+            prompt_snapshot = f"System: {system_prompt}\n\nUser: {user_prompt}"
+            
             async with pool.acquire() as conn:
                 await conn.execute(
                     """
-                    INSERT INTO suggestions (id, message_id, model_response, final_text, edited, created_at)
-                    VALUES ($1, $2, $3, $4, $5, NOW())
+                    INSERT INTO suggestions (id, message_id, prompt, model_response, final_text, edited, created_at)
+                    VALUES ($1, $2, $3, $4, $5, $6, NOW())
                     """,
                     suggestion_id,
                     message_id,
+                    prompt_snapshot,
                     suggestion_text,
                     suggestion_text,
                     False,
                 )
 
+            # Trigger tag update in background after generating suggestion
+            # This ensures tags reflect the latest conversation
+            try:
+                from app.services.contact_tags import update_contact_tags
+                import asyncio
+                # Get contact_id from the message
+                contact_id_row = await conn.fetchrow(
+                    "SELECT contact_id FROM messages WHERE id = $1",
+                    message_id
+                )
+                if contact_id_row:
+                    contact_id = contact_id_row["contact_id"]
+                    # Update tags in background (don't wait)
+                    asyncio.create_task(update_contact_tags(contact_id, pool))
+            except Exception as e:
+                print(f"[Suggestion] Failed to trigger tag update: {e}")
+            
             return {
                 "id": suggestion_id,
                 "message_id": message_id,
