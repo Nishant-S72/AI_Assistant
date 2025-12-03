@@ -286,16 +286,20 @@ Assistant:"""
         
         # Call LLM
         try:
+            # Optimize for speed: reduce max_tokens and temperature for Gemini
+            max_tokens = 200  # Reduced for faster responses
+            temperature = 0.3  # Lower temperature for faster, more deterministic responses
+            
             llm_response = await generate_chat_completion(
                 LLMRequestOptions(
-                    model=os.getenv("LLM_MODEL", "tinyllama"),
+                    model=os.getenv("GEMINI_MODEL") or os.getenv("LLM_MODEL", "gemini-2.5-flash"),
                     messages=[
                         LLMMessage("system", system_prompt),
                         LLMMessage("user", request.userMessage),
                     ],
-                    max_tokens=250,
-                    temperature=0.7,
-                    use_local=os.getenv("USE_OLLAMA") != "false",
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                    use_local=False,  # Skip Ollama when using Gemini
                     correlation_id=correlation_id,
                 )
             )
@@ -536,18 +540,18 @@ async def handle_general_intent(user_message: str, thread_id: Optional[str], ton
 
 Answer the user's question directly and helpfully. Keep it under 200 words. Be conversational and friendly."""
         
-        # Call LLM with conversational settings
+        # Call LLM with conversational settings (optimized for Gemini speed)
         temperature = float(os.getenv("LLM_GENERAL_TEMP", "0.3"))
         llm_response = await generate_chat_completion(
             LLMRequestOptions(
-                model=os.getenv("LLM_MODEL", "tinyllama"),
+                model=os.getenv("GEMINI_MODEL") or os.getenv("LLM_MODEL", "gemini-2.5-flash"),
                 messages=[
                     LLMMessage("system", system_prompt),
                     LLMMessage("user", user_message),
                 ],
-                max_tokens=200,
+                max_tokens=150,  # Reduced for faster responses
                 temperature=temperature,
-                use_local=os.getenv("USE_OLLAMA") != "false",
+                use_local=False,  # Skip Ollama when using Gemini
                 correlation_id=correlation_id,
             )
         )

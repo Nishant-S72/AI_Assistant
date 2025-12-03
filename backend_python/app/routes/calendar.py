@@ -286,14 +286,14 @@ Return ONLY the JSON object, nothing else."""
     try:
         llm_response = await generate_chat_completion(
             LLMRequestOptions(
-                model=os.getenv("LLM_MODEL") or os.getenv("OPENAI_MODEL") or "tinyllama",
+                model=os.getenv("GEMINI_MODEL") or os.getenv("LLM_MODEL", "gemini-2.5-flash"),
                 messages=[
                     LLMMessage("system", system_prompt),
                     LLMMessage("user", text),
                 ],
                 temperature=0.0,
-                max_tokens=150,
-                use_local=os.getenv("USE_OLLAMA") != "false",
+                max_tokens=120,  # Reduced for faster parsing
+                use_local=False,  # Skip Ollama when using Gemini
             )
         )
         

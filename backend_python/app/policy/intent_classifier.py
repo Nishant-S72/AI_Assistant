@@ -173,14 +173,14 @@ No other text, just the JSON."""
 
         llm_response = await generate_chat_completion(
             LLMRequestOptions(
-                model=os.getenv("LLM_MODEL", "tinyllama"),
+                model=os.getenv("GEMINI_MODEL") or os.getenv("LLM_MODEL", "gemini-2.5-flash"),
                 messages=[
                     LLMMessage("system", "You are an intent classification assistant. Return only valid JSON."),
                     LLMMessage("user", classification_prompt),
                 ],
-                max_tokens=100,
+                max_tokens=80,  # Reduced for faster classification
                 temperature=0.1,  # Low temperature for deterministic classification
-                use_local=os.getenv("USE_OLLAMA") != "false",
+                use_local=False,  # Skip Ollama when using Gemini
                 correlation_id=f"intent_classify_{os.urandom(4).hex()}",
             )
         )

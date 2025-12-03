@@ -2,7 +2,7 @@
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import JSONResponse
 from app.db.connection import get_pool
-from app.clients.llm import check_ollama_health
+from app.clients.llm import check_ollama_health, check_gemini_health
 from app.clients.vectorstore.json_adapter import _json_store
 from app.services.embeddings import get_embedding
 from pathlib import Path
@@ -30,10 +30,13 @@ async def health():
         health_status["database"] = "disconnected"
         health_status["status"] = "degraded"
 
-    # Check LLM availability
+    # Check LLM availability (priority: Gemini -> Ollama -> OpenAI)
     try:
-        use_ollama = os.getenv("USE_OLLAMA") != "false"
-        if use_ollama:
+        if os.getenv("GEMINI_API_KEY"):
+            health_status["llm"] = (
+                "gemini_available" if await check_gemini_health() else "gemini_unavailable"
+            )
+        elif os.getenv("USE_OLLAMA") != "false":
             health_status["llm"] = (
                 "ollama_available" if await check_ollama_health() else "ollama_unavailable"
             )
