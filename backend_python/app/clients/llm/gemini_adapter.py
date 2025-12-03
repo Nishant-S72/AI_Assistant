@@ -112,6 +112,9 @@ async def generate_with_gemini(options: LLMOptions) -> LLMResponse:
     
     # Extract text from response
     text = ""
+    candidate = None
+    finish_reason = "N/A"
+    
     if isinstance(response_data, dict):
         candidates = response_data.get("candidates", [])
         if not candidates:
@@ -143,11 +146,16 @@ async def generate_with_gemini(options: LLMOptions) -> LLMResponse:
                 print(f"[Gemini] Warning: Response has no parts but finishReason is STOP. Content: {content}")
             else:
                 print(f"[Gemini] Warning: Response has no parts. FinishReason: {finish_reason}, Content: {content}")
+    else:
+        # Response is not a dictionary - unexpected format
+        raise ValueError(f"Gemini API returned unexpected response format: {type(response_data)}")
     
     if not text:
         # Log the full response for debugging
         print(f"[Gemini] Error: Gemini API returned empty response. Full response: {json.dumps(response_data, indent=2)}")
-        raise ValueError(f"Gemini API returned empty response. Finish reason: {candidate.get('finishReason', 'N/A')}")
+        # Use candidate's finishReason if available, otherwise use the one we tracked
+        error_finish_reason = candidate.get('finishReason', finish_reason) if candidate else finish_reason
+        raise ValueError(f"Gemini API returned empty response. Finish reason: {error_finish_reason}")
     
     # Extract usage information if available
     usage = {}

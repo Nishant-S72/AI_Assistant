@@ -31,7 +31,7 @@ The LLM fallback chain is now:
 
 ```bash
 # Required for Gemini
-GEMINI_API_KEY=AlzaSyB7RYZeZXKE2Qrh8Q_F2HzKqGmlpNoq0SQ
+GEMINI_API_KEY=your_gemini_api_key_here
 
 # Optional: Specify Gemini model (default: gemini-2.5-flash)
 GEMINI_MODEL=gemini-2.5-flash
@@ -47,10 +47,12 @@ OPENAI_API_KEY=your_key_here
 
 ### API Key Setup
 
-The API key has been added to `.env`:
+Add the API key to `.env`:
 ```
-GEMINI_API_KEY=AlzaSyB7RYZeZXKE2Qrh8Q_F2HzKqGmlpNoq0SQ
+GEMINI_API_KEY=your_gemini_api_key_here
 ```
+
+**⚠️ SECURITY WARNING:** Never commit API keys to version control. Always use environment variables or secure secret management.
 
 ## API Reference
 

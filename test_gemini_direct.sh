@@ -3,7 +3,9 @@
 # Direct Gemini API Test Script
 # This tests the Gemini API directly without going through our backend
 
-API_KEY="AlzaSyB7RYZeZXKE2Qrh8Q_F2HzKqGmlpNoq0SQ"
+# ⚠️ SECURITY: Never commit real API keys to version control
+# Set your API key via environment variable: export GEMINI_API_KEY="your_key_here"
+API_KEY="${GEMINI_API_KEY:-your_gemini_api_key_here}"
 MODEL="gemini-2.5-flash"
 
 echo "=== Testing Gemini API Directly ==="

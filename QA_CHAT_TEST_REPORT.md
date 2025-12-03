@@ -1,6 +1,6 @@
 # QA Test Report: Chat System (POST /api/chat)
 
-**Date:** $(date)
+**Date:** 2025-01-XX
 **Base URL:** http://localhost:3001
 **Backend:** Python (FastAPI)
 **LLM:** Ollama (USE_OLLAMA=true)

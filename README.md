@@ -213,6 +213,32 @@ ai-chief-of-staff-poc/
 - `POST /api/messages/:id/generate` - Generate AI suggestion
 - `POST /api/messages/:id/send` - Send reply
 
+### V1 API (New Features)
+
+#### Streaming Chat
+- `POST /api/v1/stream_chat` - Stream chat completion using SSE
+  - Request: `{"messages": [...], "model": "...", "conversation_id": "..."}`
+  - Response: `text/event-stream` with JSON chunks
+
+#### Function Calling
+- `POST /api/v1/chat_with_tools` - Chat with LLM function calling support
+  - Automatically dispatches function calls and continues conversation
+
+#### Conversations
+- `GET /api/v1/conversations/{id}` - Get conversation with auto-summarization
+- `POST /api/v1/conversations/{id}/regenerate_summary` - Force summary regeneration
+
+#### Prompts
+- `GET /api/v1/prompts` - List all prompts
+- `GET /api/v1/prompts/active` - Get active prompt
+- `POST /api/v1/prompts` - Create new prompt version
+- `PUT /api/v1/prompts/{id}` - Update prompt
+- `DELETE /api/v1/prompts/{id}` - Delete prompt
+
+#### Admin (V1)
+- `GET /api/v1/admin/metrics` - Get analytics metrics (admin only)
+- `PATCH /api/v1/admin/users/{id}/quota` - Update user token quota (admin only)
+
 ### Admin
 - `GET /api/admin/audit?limit=50` - View audit logs (requires `ADMIN_API_KEY`)
 - `GET /api/admin/metrics` - Get metrics (acceptance rate, latency, etc.)

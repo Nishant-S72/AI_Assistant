@@ -17,6 +17,15 @@ from app.routes import (
     admin,
     policydoc,
 )
+from app.routes.v1 import (
+    stream_chat,
+    chat_with_tools,
+    conversations,
+    prompts as v1_prompts,
+    admin as v1_admin,
+)
+from app.routes.v1 import rag_with_provenance
+from app.middleware.rate_limit import RateLimitMiddleware
 
 load_dotenv()
 
@@ -67,6 +76,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Rate limiting middleware
+app.add_middleware(RateLimitMiddleware)
+
 # Include routers
 app.include_router(messages.router, prefix="/api/messages", tags=["messages"])
 app.include_router(contacts.router, prefix="/api/contacts", tags=["contacts"])
@@ -77,6 +89,14 @@ app.include_router(tasks.router, prefix="/api/tasks", tags=["tasks"])
 app.include_router(health.router, prefix="/api/health", tags=["health"])
 app.include_router(admin.router, prefix="/api/admin", tags=["admin"])
 app.include_router(policydoc.router, prefix="/api/policydoc", tags=["policydoc"])
+
+# V1 API routes
+app.include_router(stream_chat.router, prefix="/api/v1", tags=["v1-streaming"])
+app.include_router(chat_with_tools.router, prefix="/api/v1", tags=["v1-tools"])
+app.include_router(conversations.router, prefix="/api/v1/conversations", tags=["v1-conversations"])
+app.include_router(v1_prompts.router, prefix="/api/v1/prompts", tags=["v1-prompts"])
+app.include_router(v1_admin.router, prefix="/api/v1/admin", tags=["v1-admin"])
+app.include_router(rag_with_provenance.router, prefix="/api/v1", tags=["v1-rag"])
 
 
 @app.get("/")

@@ -173,30 +173,56 @@ async def get_summary(background_tasks: BackgroundTasks):
                 totals["highPriority"] = int(high_priority_row["count"]) if high_priority_row else 0
 
                 # Get tasks
-                task_rows = await conn.fetch(
-                    """
-                    SELECT 
-                        t.*,
-                        c.name as contact_name,
-                        c.email as contact_email,
-                        c.tags as contact_tags,
-                        c.company as contact_company,
-                        COALESCE(
-                            t.thread_id,
-                            (SELECT thread_id FROM messages m WHERE m.contact_id = t.contact_id ORDER BY m.created_at DESC LIMIT 1)
-                        ) as thread_id,
-                        COALESCE(
-                            t.message_id,
-                            (SELECT id FROM messages m WHERE m.contact_id = t.contact_id ORDER BY m.created_at DESC LIMIT 1)
-                        ) as message_id,
-                        (SELECT body FROM messages m WHERE m.contact_id = t.contact_id ORDER BY m.created_at DESC LIMIT 1) as latest_message_body
-                    FROM tasks t
-                    LEFT JOIN contacts c ON t.contact_id = c.id
-                    WHERE t.status = 'pending'
-                    ORDER BY t.due_at ASC NULLS LAST, t.created_at DESC
-                    LIMIT 50
-                    """
-                )
+                # Check if thread_id and message_id columns exist
+                try:
+                    # Try query with new columns first
+                    task_rows = await conn.fetch(
+                        """
+                        SELECT 
+                            t.*,
+                            c.name as contact_name,
+                            c.email as contact_email,
+                            c.tags as contact_tags,
+                            c.company as contact_company,
+                            COALESCE(
+                                t.thread_id,
+                                (SELECT thread_id FROM messages m WHERE m.contact_id = t.contact_id ORDER BY m.created_at DESC LIMIT 1)
+                            ) as thread_id,
+                            COALESCE(
+                                t.message_id,
+                                (SELECT id FROM messages m WHERE m.contact_id = t.contact_id ORDER BY m.created_at DESC LIMIT 1)
+                            ) as message_id,
+                            (SELECT body FROM messages m WHERE m.contact_id = t.contact_id ORDER BY m.created_at DESC LIMIT 1) as latest_message_body
+                        FROM tasks t
+                        LEFT JOIN contacts c ON t.contact_id = c.id
+                        WHERE t.status = 'pending'
+                        ORDER BY t.due_at ASC NULLS LAST, t.created_at DESC
+                        LIMIT 50
+                        """
+                    )
+                except Exception as e:
+                    # Fallback to old query if columns don't exist
+                    if "thread_id" in str(e) or "message_id" in str(e):
+                        task_rows = await conn.fetch(
+                            """
+                            SELECT 
+                                t.*,
+                                c.name as contact_name,
+                                c.email as contact_email,
+                                c.tags as contact_tags,
+                                c.company as contact_company,
+                                (SELECT thread_id FROM messages m WHERE m.contact_id = t.contact_id ORDER BY m.created_at DESC LIMIT 1) as thread_id,
+                                (SELECT id FROM messages m WHERE m.contact_id = t.contact_id ORDER BY m.created_at DESC LIMIT 1) as message_id,
+                                (SELECT body FROM messages m WHERE m.contact_id = t.contact_id ORDER BY m.created_at DESC LIMIT 1) as latest_message_body
+                            FROM tasks t
+                            LEFT JOIN contacts c ON t.contact_id = c.id
+                            WHERE t.status = 'pending'
+                            ORDER BY t.due_at ASC NULLS LAST, t.created_at DESC
+                            LIMIT 50
+                            """
+                        )
+                    else:
+                        raise
 
                 # Compute priority for each task
                 for row in task_rows:
