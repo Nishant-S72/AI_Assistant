@@ -144,6 +144,19 @@ export interface Task {
   priority?: 'P0' | 'P1' | 'P2';
   message_id?: string;
   thread_id?: string;
+  reminder_enabled?: boolean;
+  reminder_minutes_before?: number;
+  reminder_sent?: boolean;
+  reminder_sent_at?: string;
+  postponed_until?: string;
+  cancelled_at?: string;
+  cancelled_reason?: string;
+  completed_at?: string;
+  time_until_due?: {
+    days: number;
+    hours: number;
+    minutes: number;
+  };
 }
 
 export interface HealthLocal {
@@ -159,16 +172,33 @@ export interface HealthLocal {
 
 export interface CalendarEvent {
   id: string;
+  user_id: string;
   title: string;
   description?: string;
-  start_time: string;
-  end_time: string;
-  is_recurring: boolean;
-  recurrence_pattern?: 'daily' | 'weekly' | 'monthly' | 'yearly';
-  recurrence_end_date?: string;
-  recurrence_interval?: number;
   location?: string;
-  attendees?: string[];
+  video_link?: string;
+  start: string;  // ISO 8601
+  end: string;  // ISO 8601
+  all_day: boolean;
+  color: string;
+  timezone: string;
+  recurrence_rule?: string;  // RRULE format
+  attendees: Array<{ email: string; name?: string; status?: string }>;
+  source: 'local' | 'google';
+  source_event_id?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface Reminder {
+  id: string;
+  user_id: string;
+  event_id?: string;
+  minutes_before?: number;
+  when?: string;  // ISO 8601
+  channel: 'inapp' | 'email' | 'slack';
+  repeat_rule?: string;
+  delivered: boolean;
   created_at: string;
   updated_at: string;
 }
@@ -260,16 +290,37 @@ export const api = {
   },
 
   // Tasks
-  getTasks: async (status?: string): Promise<Task[]> => {
-    const params = status ? `?status=${status}` : '';
-    return fetchApi<Task[]>(`/api/tasks${params}`);
-  },
-
-  createTask: async (task: Partial<Task>): Promise<Task> => {
-    return fetchApi<Task>('/api/tasks', {
-      method: 'POST',
-      body: JSON.stringify(task),
-    });
+  tasks: {
+    getTasks: async (status?: string): Promise<Task[]> => {
+      const params = status ? `?status=${status}` : '';
+      return fetchApi<Task[]>(`/api/tasks${params}`);
+    },
+    createTask: async (task: Partial<Task>): Promise<Task> => {
+      return fetchApi<Task>('/api/tasks', {
+        method: 'POST',
+        body: JSON.stringify(task),
+      });
+    },
+    getReminders: async (): Promise<Task[]> => {
+      return fetchApi<Task[]>('/api/tasks/reminders');
+    },
+    completeTask: async (taskId: string): Promise<Task> => {
+      return fetchApi<Task>(`/api/tasks/${taskId}/complete`, {
+        method: 'PATCH',
+      });
+    },
+    cancelTask: async (taskId: string, reason?: string): Promise<Task> => {
+      return fetchApi<Task>(`/api/tasks/${taskId}/cancel`, {
+        method: 'PATCH',
+        body: JSON.stringify({ reason }),
+      });
+    },
+    postponeTask: async (taskId: string, newDueDate: string): Promise<Task> => {
+      return fetchApi<Task>(`/api/tasks/${taskId}/postpone`, {
+        method: 'PATCH',
+        body: JSON.stringify({ new_due_date: newDueDate }),
+      });
+    },
   },
 
   // Health
@@ -321,6 +372,196 @@ export const api = {
     return fetchApi(`/api/calendar/events/${id}`, {
       method: 'DELETE',
     });
+  },
+
+  // New Scheduler API (replaces old calendar API)
+  scheduler: {
+    // Chat with scheduler assistant
+    chat: async (messages: Array<{ role: string; content: string }>, conversationId?: string): Promise<{ response: string; function_call?: any }> => {
+      return fetchApi('/api/v1/scheduler/chat', {
+        method: 'POST',
+        body: JSON.stringify({ messages, conversation_id: conversationId }),
+      });
+    },
+
+    // Parse natural language scheduling request
+    parseSchedule: async (naturalLanguage: string): Promise<any> => {
+      return fetchApi('/api/v1/scheduler/parse', {
+        method: 'POST',
+        body: JSON.stringify({ natural_language: naturalLanguage }),
+      });
+    },
+
+    // Create event
+    createEvent: async (event: {
+      title: string;
+      start_time: string;
+      end_time: string;
+      calendar_provider?: string;
+      attendees?: string[];
+      location?: string;
+      description?: string;
+      timezone?: string;
+      recurrence_rule?: string;
+    }): Promise<any> => {
+      return fetchApi('/api/v1/scheduler/create_event', {
+        method: 'POST',
+        body: JSON.stringify(event),
+      });
+    },
+
+    // Find availability
+    findAvailability: async (startDate: string, endDate: string, durationMinutes?: number, calendarProvider?: string): Promise<any> => {
+      return fetchApi('/api/v1/scheduler/find_availability', {
+        method: 'POST',
+        body: JSON.stringify({
+          start_date: startDate,
+          end_date: endDate,
+          duration_minutes: durationMinutes || 60,
+          calendar_provider: calendarProvider || 'google',
+        }),
+      });
+    },
+
+    // List events (from event_mirror)
+    listEvents: async (startDate?: string, endDate?: string): Promise<{ events: any[] }> => {
+      const params = new URLSearchParams();
+      if (startDate) params.append('start_date', startDate);
+      if (endDate) params.append('end_date', endDate);
+      const queryString = params.toString();
+      return fetchApi(`/api/v1/scheduler/events${queryString ? `?${queryString}` : ''}`);
+    },
+
+    // Reschedule event
+    rescheduleEvent: async (eventId: string, newStartTime: string, newEndTime: string): Promise<any> => {
+      return fetchApi(`/api/v1/scheduler/reschedule/${eventId}`, {
+        method: 'POST',
+        body: JSON.stringify({
+          new_start_time: newStartTime,
+          new_end_time: newEndTime,
+        }),
+      });
+    },
+
+    // Cancel event
+    cancelEvent: async (eventId: string): Promise<any> => {
+      return fetchApi(`/api/v1/scheduler/cancel_event/${eventId}`, {
+        method: 'POST',
+      });
+    },
+
+    // OAuth - Google
+    connectGoogle: async (redirectUri: string): Promise<{ oauth_url: string; state: string }> => {
+      return fetchApi(`/api/v1/scheduler/connect/google?redirect_uri=${encodeURIComponent(redirectUri)}`, {
+        method: 'POST',
+      });
+    },
+
+    // OAuth - Outlook
+    connectOutlook: async (redirectUri: string): Promise<{ oauth_url: string; state: string }> => {
+      return fetchApi(`/api/v1/scheduler/connect/outlook?redirect_uri=${encodeURIComponent(redirectUri)}`, {
+        method: 'POST',
+      });
+    },
+  },
+
+  // Calendar API (v1 - standalone events and reminders)
+  calendar: {
+    // List events
+    listEvents: async (start: string, end: string, source?: 'local' | 'google'): Promise<{ events: CalendarEvent[] }> => {
+      const params = new URLSearchParams();
+      params.append('start', start);
+      params.append('end', end);
+      if (source) params.append('source', source);
+      return fetchApi(`/api/v1/calendar/events?${params.toString()}`);
+    },
+
+    // Create event
+    createEvent: async (event: {
+      title: string;
+      description?: string;
+      location?: string;
+      video_link?: string;
+      start: string;
+      end: string;
+      all_day?: boolean;
+      color?: string;
+      timezone?: string;
+      recurrence_rule?: string;
+      attendees?: Array<{ email: string; name?: string; status?: string }>;
+      sync_to_google?: boolean;
+    }): Promise<CalendarEvent> => {
+      return fetchApi('/api/v1/calendar/events', {
+        method: 'POST',
+        body: JSON.stringify(event),
+      });
+    },
+
+    // Update event
+    updateEvent: async (eventId: string, updates: {
+      title?: string;
+      description?: string;
+      location?: string;
+      video_link?: string;
+      start?: string;
+      end?: string;
+      all_day?: boolean;
+      color?: string;
+      timezone?: string;
+      recurrence_rule?: string;
+      attendees?: Array<{ email: string; name?: string; status?: string }>;
+      sync_to_google?: boolean;
+    }): Promise<CalendarEvent> => {
+      return fetchApi(`/api/v1/calendar/events/${eventId}`, {
+        method: 'PATCH',
+        body: JSON.stringify(updates),
+      });
+    },
+
+    // Delete event
+    deleteEvent: async (eventId: string, syncToGoogle?: boolean): Promise<{ success: boolean }> => {
+      const params = new URLSearchParams();
+      if (syncToGoogle) params.append('sync_to_google', 'true');
+      return fetchApi(`/api/v1/calendar/events/${eventId}?${params.toString()}`, {
+        method: 'DELETE',
+      });
+    },
+
+    // Create reminder
+    createReminder: async (eventId: string, reminder: {
+      minutes_before?: number;
+      when?: string;
+      channel?: 'inapp' | 'email' | 'slack';
+      repeat_rule?: string;
+    }): Promise<Reminder> => {
+      return fetchApi(`/api/v1/calendar/events/${eventId}/reminders`, {
+        method: 'POST',
+        body: JSON.stringify(reminder),
+      });
+    },
+
+    // List reminders
+    listReminders: async (eventId?: string): Promise<{ reminders: Reminder[] }> => {
+      const params = new URLSearchParams();
+      if (eventId) params.append('event_id', eventId);
+      return fetchApi(`/api/v1/calendar/reminders?${params.toString()}`);
+    },
+
+    // Import from Google
+    importGoogle: async (start: string, end: string): Promise<{
+      success: boolean;
+      imported: number;
+      updated: number;
+      skipped: number;
+      total: number;
+    }> => {
+      const params = new URLSearchParams();
+      params.append('start', start);
+      params.append('end', end);
+      return fetchApi(`/api/v1/calendar/import/google?${params.toString()}`, {
+        method: 'POST',
+      });
+    },
   },
 };
 
@@ -382,17 +623,35 @@ export interface Citation {
 }
 
 export interface ChatResponse {
-  kind: 'assistant' | 'policy' | 'action';
+  kind: 'assistant' | 'policy' | 'action' | 'suggestion' | 'action_planned' | 'action_executed';
   text: string;
   citations?: Citation[];
   suggestionId: string | null;
-  intent: 'policy_intent' | 'action_intent' | 'general_intent';
+  intent: 'policy_intent' | 'action_intent' | 'general_intent' | 'general' | 'rag' | 'action_candidate';
   intent_confidence: number;
+  action_plan?: {
+    action_type: string;
+    parameters: any;
+    confidence: number;
+    missing_fields: string[];
+  };
+  action_execution?: {
+    executed: boolean;
+    result?: any;
+    error?: string;
+    reason?: string;
+  };
   action_suggestion?: {
     action_type: string;
     confirm_needed: boolean;
     extracted_data?: any;
   };
+  action_result?: {
+    success: boolean;
+    eventId?: string;
+    event?: any;
+  };
+  tier?: 'assist' | 'pro';
   escalated?: boolean;
 }
 
@@ -461,5 +720,36 @@ export interface PolicyChunk {
 export const policyDoc = {
   getChunks: async (): Promise<{ chunks: PolicyChunk[] }> => {
     return fetchApi<{ chunks: PolicyChunk[] }>('/api/policydoc/chunks');
+  },
+};
+
+// Phase 1 Chat API (v1)
+export const chatV1 = {
+  chat: async (request: {
+    userMessage: string;
+    threadId?: string;
+    tone?: 'formal' | 'warm' | 'crisp';
+    conversationHistory?: Array<{ role: string; content: string }>;
+  }): Promise<ChatResponse> => {
+    return fetchApi<ChatResponse>('/api/v1/chat', {
+      method: 'POST',
+      headers: {
+        'X-User-ID': 'demo-user', // TODO: Get from auth
+      },
+      body: JSON.stringify(request),
+    });
+  },
+
+  executeAction: async (actionPlan: {
+    action_type: string;
+    parameters: any;
+  }): Promise<{ executed: boolean; result?: any; error?: string }> => {
+    return fetchApi('/api/v1/chat/execute', {
+      method: 'POST',
+      headers: {
+        'X-User-ID': 'demo-user', // TODO: Get from auth
+      },
+      body: JSON.stringify(actionPlan),
+    });
   },
 };

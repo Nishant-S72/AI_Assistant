@@ -70,13 +70,15 @@ def classify_intent(user_message: str) -> Dict[str, Any]:
     action_candidate = False
     action_reasons = []
     
-    # Action keywords (comprehensive list)
+    # Action keywords (calendar/scheduling removed - only non-calendar actions)
     action_keywords = [
-        'schedule', 'scheduling', 'scheduled', 'book', 'booking', 'booked',
-        'plan', 'planning', 'arrange', 'arranging', 'set up', 'setup',
-        'create event', 'add event', 'calendar', 'meeting', 'appointment',
-        'call', 'conference', 'reminder', 'invite', 'invitation',
-        'reserve', 'reservation', 'block time', 'time slot'
+        # Calendar/scheduling keywords removed from chat bubble
+        # 'schedule', 'scheduling', 'scheduled', 'book', 'booking', 'booked',
+        # 'plan', 'planning', 'arrange', 'arranging', 'set up', 'setup',
+        # 'create event', 'add event', 'calendar', 'meeting', 'appointment',
+        # 'call', 'conference', 'reminder', 'invite', 'invitation',
+        # 'reserve', 'reservation', 'block time', 'time slot'
+        # Keep only non-calendar actions if any
     ]
     
     action_matches = [kw for kw in action_keywords if kw in lower_message]
@@ -295,10 +297,10 @@ def classify_intent_sync(user_message: str) -> Dict[str, Any]:
     
     lower_message = user_message.lower().strip()
     
-    # Check action keywords
-    action_keywords = ['schedule', 'meeting', 'calendar', 'book', 'appointment']
-    if any(kw in lower_message for kw in action_keywords):
-        return {"intent": "action_intent", "confidence": 0.85, "reasons": ["Action keywords"], "method": "rules"}
+    # Check action keywords (calendar/scheduling removed)
+    # action_keywords = ['schedule', 'meeting', 'calendar', 'book', 'appointment']
+    # if any(kw in lower_message for kw in action_keywords):
+    #     return {"intent": "action_intent", "confidence": 0.85, "reasons": ["Action keywords"], "method": "rules"}
     
     # Check policy keywords
     policy_keywords = ['policy', 'rule', 'procedure', 'guideline']

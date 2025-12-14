@@ -244,6 +244,7 @@ async def seed_test_messages():
                 thread_id = f"thread_rag_test_{uuid.uuid4().hex[:12]}"
                 
                 # Create messages in thread
+                last_msg_timestamp = None
                 for msg in chain["thread"]:
                     message_id = str(uuid.uuid4())
                     await conn.execute(
@@ -259,6 +260,21 @@ async def seed_test_messages():
                         "email",
                         msg["created_at"]
                     )
+                    last_msg_timestamp = msg["created_at"]
+                
+                # Invalidate cache for this contact and thread
+                try:
+                    from app.services.cache_manager import invalidate_cache
+                    from datetime import datetime
+                    msg_timestamp = datetime.fromisoformat(last_msg_timestamp.replace('Z', '+00:00')) if isinstance(last_msg_timestamp, str) else last_msg_timestamp
+                    invalidate_cache(
+                        reason="new_message",
+                        contact_id=contact_id,
+                        thread_id=thread_id,
+                        message_timestamp=msg_timestamp
+                    )
+                except Exception as cache_error:
+                    print(f"[Seed] Failed to invalidate cache: {cache_error}")
                 
                 seeded_count += 1
                 print(f"✅ Seeded: {chain['description']} - {chain['contact']['name']}")

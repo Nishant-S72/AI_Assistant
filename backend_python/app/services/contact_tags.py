@@ -326,6 +326,16 @@ async def update_contact_tags(
                 contact_id
             )
             
+            # Invalidate cache when tags are updated
+            from app.services.cache_manager import invalidate_cache
+            try:
+                invalidate_cache(
+                    reason="tag_updated",
+                    contact_id=contact_id
+                )
+            except Exception as cache_error:
+                print(f"[Tags] Failed to invalidate cache: {cache_error}")
+            
             print(f"[Tags] Updated tags for {contact_name}: {tags}")
             return tags
         else:
@@ -348,6 +358,17 @@ async def update_contact_tags(
                     tags_json,
                     contact_id
                 )
+                
+                # Invalidate cache when tags are updated
+                from app.services.cache_manager import invalidate_cache
+                try:
+                    invalidate_cache(
+                        reason="tag_updated",
+                        contact_id=contact_id
+                    )
+                except Exception as cache_error:
+                    print(f"[Tags] Failed to invalidate cache: {cache_error}")
+                
                 print(f"[Tags] Regenerated tags for {contact_name}: {tags}")
                 return tags
 

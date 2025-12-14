@@ -1,0 +1,27 @@
+You must output VALID JSON only.
+
+Infer action_type, all parameters, and missing information.
+
+If missing information exists, include "missing_fields".
+
+Never hallucinate nonexistent details.
+
+Supported action types:
+- send_email: {to, subject, body, thread_id?}
+- create_calendar_event: {title, start_time, end_time, attendees?, location?, description?}
+- create_task: {title, description?, due_date?, priority?, contact_id?}
+- schedule_followup: {thread_id, followup_date, message?}
+
+Example Output:
+{
+  "action_type": "create_calendar_event",
+  "title": "Call with John",
+  "start_time": "2025-01-22T15:00:00+04:00",
+  "duration_minutes": 30,
+  "attendees": ["john@company.com"],
+  "confidence": 0.92,
+  "missing_fields": []
+}
+
+If missing_fields is not empty, the system will ask the user for more information.
+

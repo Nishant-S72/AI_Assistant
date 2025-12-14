@@ -7,13 +7,14 @@ from app.clients.vectorstore import query_vectorstore
 from app.policy.policy_engine import check_policy
 import uuid
 import os
+import json
 
 router = APIRouter()
 
 
 @router.get("")
 async def list_messages(folder: str = Query("all", alias="folder")):
-    """List messages with optional folder filtering."""
+    """List messages with optional folder filtering. Limited to 50 quality messages representing all categories."""
     try:
         pool = await get_pool()
         
@@ -25,38 +26,91 @@ async def list_messages(folder: str = Query("all", alias="folder")):
             # Database not available
             return []
 
-        query = """
-            SELECT 
-                m.id,
-                m.thread_id,
-                m.sender,
-                m.body,
-                m.channel,
-                m.created_at,
-                c.name as contact_name,
-                c.company as contact_company,
-                c.email as contact_email,
-                (SELECT COUNT(*) FROM messages m2 WHERE m2.thread_id = m.thread_id) as message_count
-            FROM messages m
-            JOIN contacts c ON m.contact_id = c.id
+        # Base query - get one representative message per thread
+        base_query = """
+            WITH ranked_messages AS (
+                SELECT 
+                    m.id,
+                    m.thread_id,
+                    m.sender,
+                    m.body,
+                    m.channel,
+                    m.created_at,
+                    m.contact_id,
+                    c.name as contact_name,
+                    c.company as contact_company,
+                    c.email as contact_email,
+                    c.tags as contact_tags,
+                    (SELECT COUNT(*) FROM messages m2 WHERE m2.thread_id = m.thread_id) as message_count,
+                    ROW_NUMBER() OVER (PARTITION BY m.thread_id ORDER BY m.created_at DESC) as rn
+                FROM messages m
+                JOIN contacts c ON m.contact_id = c.id
         """
 
         # Folder filtering
+        where_clause = ""
         if folder == "leads":
-            query += " WHERE c.tags::text LIKE '%lead%'"
+            where_clause = " WHERE c.tags::text LIKE '%lead%' OR c.tags::text LIKE '%new-lead%' OR c.tags::text LIKE '%potential-interest%'"
         elif folder == "tasks":
-            query += """ WHERE EXISTS (
+            where_clause = """ WHERE EXISTS (
                 SELECT 1 FROM tasks t WHERE t.contact_id = c.id AND t.status = 'pending'
             )"""
 
-        query += " ORDER BY m.created_at DESC"
+        query = base_query + where_clause + """
+            )
+            SELECT * FROM ranked_messages WHERE rn = 1
+        """
 
+        # Get messages representing all categories
         try:
             async with pool.acquire() as conn:
-                rows = await conn.fetch(query)
-                result = [dict(row) for row in rows]
+                all_rows = await conn.fetch(query)
+                
+                # Categorize messages by tags
+                categorized = {
+                    'urgent': [],
+                    'leads': [],
+                    'complaints': [],
+                    'general': []
+                }
+                
+                for row in all_rows:
+                    tags = row.get('contact_tags', [])
+                    if isinstance(tags, str):
+                        try:
+                            tags = json.loads(tags)
+                        except:
+                            tags = []
+                    if not isinstance(tags, list):
+                        tags = []
+                    
+                    tags_str = ' '.join(tags).lower()
+                    
+                    if 'urgent' in tags_str or 'escalation' in tags_str:
+                        categorized['urgent'].append(dict(row))
+                    elif 'lead' in tags_str or 'potential-interest' in tags_str:
+                        categorized['leads'].append(dict(row))
+                    elif 'complaint' in tags_str or 'refund' in tags_str:
+                        categorized['complaints'].append(dict(row))
+                    else:
+                        categorized['general'].append(dict(row))
+                
+                # Select up to 50 messages, ensuring representation from all categories
+                result = []
+                max_per_category = 15  # Distribute across categories
+                
+                for category, messages in categorized.items():
+                    result.extend(messages[:max_per_category])
+                    if len(result) >= 50:
+                        break
+                
+                # Sort by created_at DESC and limit to 50
+                result = sorted(result, key=lambda x: x.get('created_at', ''), reverse=True)[:50]
+                
         except Exception as query_error:
             print(f"Database query failed: {query_error}")
+            import traceback
+            traceback.print_exc()
             return []
 
         # If no results and in offline mode, try to load dummy inbox
@@ -67,7 +121,7 @@ async def list_messages(folder: str = Query("all", alias="folder")):
                 # Retry query
                 async with pool.acquire() as conn:
                     rows = await conn.fetch(query)
-                    result = [dict(row) for row in rows]
+                    result = [dict(row) for row in rows][:50]
             except Exception as load_error:
                 print(f"Could not load dummy inbox: {load_error}")
 

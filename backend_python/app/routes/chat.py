@@ -490,128 +490,36 @@ Assistant Response:"""
 
 
 async def handle_action_intent(user_message: str, thread_id: Optional[str], tone: Optional[str], intent_result: Dict[str, Any]) -> Dict[str, Any]:
-    """Handle action intent - parse and create calendar events or tasks."""
-    from app.routes.calendar import parse_event_text
+    """
+    Handle action intent - calendar scheduling removed from chat bubble.
     
-    correlation_id = str(uuid.uuid4())
-    start_time = datetime.now()
+    NOTE: Calendar scheduling has been removed from the chat bubble.
+    Users should use the dedicated scheduler API at /api/v1/scheduler/chat
+    or the scheduler UI components.
     
-    try:
-        # Parse event from user message
-        parse_result = await parse_event_text(user_message)
-        
-        if parse_result.get("event"):
-            event_data = parse_result["event"]
-            
-            # Create event in database
-            pool = await get_pool()
-            async with pool.acquire() as conn:
-                # Insert into calendar_events table (match schema from calendar.py)
-                from datetime import datetime as dt
-                start_dt = dt.fromisoformat(event_data["start_time"].replace("Z", "+00:00"))
-                end_dt = dt.fromisoformat(event_data["end_time"].replace("Z", "+00:00"))
-                
-                event_row = await conn.fetchrow(
-                    """
-                    INSERT INTO calendar_events (
-                        title, description, start_time, end_time,
-                        is_recurring, recurrence_pattern, recurrence_interval,
-                        location, attendees
-                    )
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-                    RETURNING id, title, start_time, end_time, is_recurring, recurrence_pattern
-                    """,
-                    event_data.get("title"),
-                    event_data.get("description"),
-                    start_dt,
-                    end_dt,
-                    event_data.get("is_recurring", False),
-                    event_data.get("recurrence_pattern"),
-                    event_data.get("recurrence_interval", 1),
-                    event_data.get("location"),
-                    json.dumps(event_data.get("attendees", [])),
-                )
-            
-            event_id = str(event_row["id"])
-            
-            # Format event time
-            try:
-                event_start = datetime.fromisoformat(event_data["start_time"].replace("Z", "+00:00"))
-                event_time = event_start.strftime("%A, %B %d at %I:%M %p")
-            except:
-                event_time = event_data.get("start_time", "the scheduled time")
-            
-            # Create confirmation message
-            text = f'✅ I\'ve added "{event_data.get("title", "Event")}" to your calendar for {event_time}.'
-            if event_data.get("is_recurring"):
-                text += f' This is a {event_data.get("recurrence_pattern", "recurring")} recurring event.'
-            if event_data.get("location"):
-                text += f' Location: {event_data["location"]}.'
-            
-            # Log to audit
-            try:
-                pool = await get_pool()
-                async with pool.acquire() as conn:
-                    await conn.execute(
-                        """
-                        INSERT INTO events (type, correlation_id, raw_model_response, final_text, latency_ms, payload)
-                        VALUES ($1, $2, $3, $4, $5, $6)
-                        """,
-                        "action_calendar_created",
-                        correlation_id,
-                        text,
-                        text,
-                        int((datetime.now() - start_time).total_seconds() * 1000),
-                        json.dumps({
-                            "intent": "action_intent",
-                            "action_type": "calendar_event",
-                            "event_id": event_id,
-                            "user_message": user_message[:200],
-                        }),
-                    )
-            except Exception as e:
-                print(f"[Action] Failed to log to audit: {e}")
-            
-            return {
-                "kind": "action",
-                "text": text,
-                "citations": [],
-                "suggestionId": str(uuid.uuid4()),
-                "intent": "action_intent",
-                "intent_confidence": intent_result.get("confidence", 0.9),
-                "action_result": {
-                    "success": True,
-                    "eventId": event_id,
-                    "event": dict(event_row),
-                },
-                "escalated": False,
-            }
-        else:
-            # Missing required fields - ask clarifying question
-            missing_fields = parse_result.get("missing_fields", [])
-            clarifying_question = parse_result.get("clarifying_question", "What time would you like to schedule this?")
-            
-            return {
-                "kind": "action",
-                "text": clarifying_question,
-                "citations": [],
-                "suggestionId": str(uuid.uuid4()),
-                "intent": "action_intent",
-                "intent_confidence": intent_result.get("confidence", 0.9),
-                "action_suggestion": {
-                    "action_type": "calendar_event",
-                    "confirm_needed": True,
-                    "missing_fields": missing_fields,
-                },
-                "escalated": False,
-            }
+    This handler now only processes non-calendar actions (e.g., tasks).
+    For calendar scheduling, route to the new scheduler endpoint.
+    """
+    # Calendar scheduling removed - action_intent now routes to general_intent
+    # This function is kept for backward compatibility but should not be called
+    # for calendar-related actions.
     
-    except Exception as e:
-        print(f"[Action] Error handling action intent: {e}")
-        import traceback
-        traceback.print_exc()
-        # Fallback to general response
-        return await handle_general_intent(user_message, thread_id, tone)
+    # If this is a scheduling request, suggest using the scheduler
+    scheduling_keywords = ["schedule", "meeting", "appointment", "calendar", "book", "reserve"]
+    if any(keyword in user_message.lower() for keyword in scheduling_keywords):
+        return {
+            "kind": "assistant",
+            "text": "I can help you schedule meetings! Please use the Calendar page or the dedicated scheduler interface for calendar scheduling.",
+            "citations": [],
+            "suggestionId": str(uuid.uuid4()),
+            "intent": "general_intent",
+            "intent_confidence": 0.8,
+            "escalated": False,
+        }
+    
+    # For other action intents (non-calendar), handle as general intent
+    # This preserves chat bubble functionality for non-scheduling tasks
+    return await handle_general_intent(user_message, thread_id, tone)
 
 
 async def handle_general_intent(user_message: str, thread_id: Optional[str], tone: Optional[str]) -> Dict[str, Any]:

@@ -11,6 +11,12 @@ A production-ready proof-of-concept for an AI-powered communication assistant th
 - 🎨 **Modern UI**: Next.js frontend with Tailwind CSS and Framer Motion
 - 🐳 **Docker Compose**: Local Postgres, Redis, and optional Chroma
 - ✅ **Tests & CI**: Unit tests, integration tests, and GitHub Actions
+- 🌊 **SSE Streaming**: Real-time streaming responses via Server-Sent Events
+- 🔧 **Function Calling**: LLM tool calling with extensible registry
+- 💾 **Conversation Memory**: Auto-summarization for long conversations
+- 📚 **RAG Provenance**: Source attribution with metadata and snippets
+- 🔄 **Fallback LLM**: Automatic retry with fallback model on failures
+- 📅 **Scheduling Assistant**: Complete calendar integration with Google/Outlook, reminders, and natural language scheduling
 
 ## Quick Start
 
@@ -80,6 +86,124 @@ MAX_PROMPT_TOKENS=8000
    ```
 
 The system will automatically fall back to OpenAI if Ollama is unreachable.
+
+## New Backend Features (v1 API)
+
+### 1. SSE Streaming (`POST /api/v1/stream_chat`)
+
+Stream chat completions in real-time using Server-Sent Events:
+
+**Backend:**
+```python
+# Returns text/event-stream with JSON chunks
+# {"type": "token", "text": "..."} for each token
+# {"type": "done"} when complete
+```
+
+**Frontend Integration:**
+```javascript
+const eventSource = new EventSource('/api/v1/stream_chat', {
+  method: 'POST',
+  body: JSON.stringify({
+    messages: [{ role: 'user', content: 'Hello' }],
+    model: 'gpt-4o-mini',
+    conversation_id: 'conv-123'
+  })
+});
+
+eventSource.onmessage = (event) => {
+  const chunk = JSON.parse(event.data);
+  if (chunk.type === 'token') {
+    // Append chunk.text to chat window
+    appendToChat(chunk.text);
+  } else if (chunk.type === 'done') {
+    eventSource.close();
+  }
+};
+
+// Cancel button
+cancelButton.onclick = () => eventSource.close();
+```
+
+### 2. Function Calling / Tool Registry
+
+LLM can call registered functions:
+
+**Backend:**
+```python
+from app.tools.registry import get_registry
+
+registry = get_registry()
+# Tools are auto-registered: send_email, get_calendar_events
+```
+
+**Usage:**
+```bash
+POST /api/v1/chat_with_tools
+{
+  "messages": [...],
+  "model": "gpt-4o-mini",
+  "conversation_id": "conv-123"
+}
+```
+
+The LLM will automatically call registered tools when needed. Function results are appended to the conversation and the LLM continues.
+
+### 3. Conversation Memory & Auto-Summarization
+
+Conversations are automatically summarized when they exceed 30 messages:
+
+**Backend:**
+```python
+# Auto-triggers when message count > 30
+# Oldest messages replaced with summary placeholder
+```
+
+**Regenerate Summary:**
+```bash
+POST /api/v1/conversations/{id}/regenerate_summary
+```
+
+### 4. RAG Provenance
+
+RAG responses include source attribution:
+
+**Response Format:**
+```json
+{
+  "response": "Answer text...",
+  "provenance": [
+    {
+      "source": "policy.md",
+      "filename": "policy.md",
+      "fragment_index": 0,
+      "score": 0.85,
+      "snippet": "Relevant text snippet..."
+    }
+  ]
+}
+```
+
+**Configurable Chunk Size:**
+```bash
+# Set in .env
+RAG_CHUNK_SIZE=500  # Default: 500
+```
+
+### 5. Fallback LLM Logic
+
+Automatic retry with fallback model on primary failure:
+
+**Configuration:**
+```bash
+OPENAI_MODEL=gpt-4o-mini        # Primary
+FALLBACK_LLM_MODEL=gpt-4o-mini  # Fallback (can be different)
+```
+
+The system will:
+1. Try primary model (with timeout)
+2. On failure/timeout, retry once with fallback
+3. Log both attempts
 
 ## Offline Local Demo Mode
 
@@ -237,7 +361,17 @@ ai-chief-of-staff-poc/
 
 #### Admin (V1)
 - `GET /api/v1/admin/metrics` - Get analytics metrics (admin only)
+  - Returns: `{"total_requests": 1000, "total_tokens_used": 50000, "avg_latency_ms": 150.5}`
 - `PATCH /api/v1/admin/users/{id}/quota` - Update user token quota (admin only)
+  - Request: `{"monthly_quota_tokens": 200000}`
+
+#### Prompts (V1)
+- `POST /api/v1/prompts` - Create new prompt version (admin only)
+- `GET /api/v1/prompts` - List all prompts (filter: `?name=...&active_only=true`)
+- `GET /api/v1/prompts/{id}` - Get specific prompt
+- `PATCH /api/v1/prompts/{id}` - Update prompt (admin only)
+- `DELETE /api/v1/prompts/{id}` - Delete prompt (admin only)
+- `GET /api/v1/prompts/active/active` - Get active prompt (`?name=...` for specific name)
 
 ### Admin
 - `GET /api/admin/audit?limit=50` - View audit logs (requires `ADMIN_API_KEY`)
@@ -376,6 +510,200 @@ yarn lint
 ## License
 
 MIT
+
+## Medium Priority Features (v1 API)
+
+### 6. Rate Limiting & Monthly Quotas
+
+Users have monthly token quotas (default: 100,000 tokens). Quotas are enforced via middleware and reset monthly.
+
+**Configuration:**
+```bash
+# Quotas are stored in user_quotas table
+# Default quota: 100,000 tokens/month
+```
+
+**Admin Endpoint:**
+```bash
+PATCH /api/v1/admin/users/{user_id}/quota
+{
+  "monthly_quota_tokens": 200000
+}
+```
+
+**Quota Exceeded Response (429):**
+```json
+{
+  "error": "Quota exceeded",
+  "message": "Monthly token quota exceeded. Please contact admin.",
+  "quota": {
+    "quota": 100000,
+    "used": 100001,
+    "remaining": -1
+  }
+}
+```
+
+### 7. Admin Metrics & Observability
+
+System metrics are automatically tracked via middleware:
+
+**Endpoint:**
+```bash
+GET /api/v1/admin/metrics
+```
+
+**Response:**
+```json
+{
+  "total_requests": 1523,
+  "total_tokens_used": 125000,
+  "avg_latency_ms": 145.32,
+  "timestamp": "2025-01-XX..."
+}
+```
+
+**Frontend Integration (Admin Dashboard):**
+```javascript
+// Fetch metrics
+const response = await fetch('/api/v1/admin/metrics', {
+  headers: {
+    'X-User-ID': userId,
+    'X-Role': 'admin'
+  }
+});
+const metrics = await response.json();
+console.log(`Total requests: ${metrics.total_requests}`);
+```
+
+### 8. Prompt Library & Versioning
+
+Prompts can be versioned and managed via API:
+
+**Create Prompt:**
+```bash
+POST /api/v1/prompts
+{
+  "name": "assistant_prompt",
+  "content": "You are a helpful assistant...",
+  "version": 1,
+  "active": true
+}
+```
+
+**List Prompts:**
+```bash
+GET /api/v1/prompts?name=assistant_prompt&active_only=true
+```
+
+**Get Active Prompt:**
+```bash
+GET /api/v1/prompts/active/active?name=assistant_prompt
+```
+
+**Update Prompt:**
+```bash
+PATCH /api/v1/prompts/{id}
+{
+  "content": "Updated prompt...",
+  "active": true
+}
+```
+
+When a prompt is set as `active`, all other versions of the same name are automatically deactivated.
+
+### 9. Connector Skeletons (Gmail & Slack)
+
+OAuth-based connectors for Gmail and Slack are available as skeletons:
+
+**Gmail OAuth Flow:**
+1. Redirect user to authorization URL:
+   ```python
+   from app.connectors.gmail import build_auth_url
+   auth_url = build_auth_url(state="csrf_token")
+   ```
+
+2. Handle callback and exchange code:
+   ```python
+   from app.connectors.gmail import exchange_code
+   token = await exchange_code(code)
+   ```
+
+3. Fetch messages:
+   ```python
+   from app.connectors.gmail import fetch_messages
+   messages = await fetch_messages(user_id, folder="inbox")
+   ```
+
+**Environment Variables:**
+```bash
+GMAIL_CLIENT_ID=your_client_id
+GMAIL_CLIENT_SECRET=your_client_secret
+GMAIL_REDIRECT_URI=http://localhost:3001/api/connectors/gmail/callback
+
+SLACK_CLIENT_ID=your_client_id
+SLACK_CLIENT_SECRET=your_client_secret
+SLACK_REDIRECT_URI=http://localhost:3001/api/connectors/slack/callback
+```
+
+**Frontend OAuth Flow (React snippet):**
+```javascript
+// 1. Redirect to OAuth URL
+const authUrl = await fetch('/api/connectors/gmail/auth-url').then(r => r.json());
+window.location.href = authUrl.url;
+
+// 2. Handle callback (in callback route)
+const code = new URLSearchParams(window.location.search).get('code');
+await fetch('/api/connectors/gmail/callback', {
+  method: 'POST',
+  body: JSON.stringify({ code })
+});
+
+// 3. Fetch messages
+const messages = await fetch('/api/connectors/gmail/messages?folder=inbox').then(r => r.json());
+```
+
+**Normalized Message Format:**
+All connectors return messages in a common format:
+```json
+{
+  "id": "msg_123",
+  "from": "sender@example.com",
+  "to": "recipient@example.com",
+  "subject": "Message subject",
+  "body": "Message body text",
+  "date": "2025-01-XX..."
+}
+```
+
+### 10. RBAC (User Roles)
+
+Role-based access control with three roles:
+- **admin**: Full access, can manage quotas, metrics, prompts
+- **user**: Standard access, can use chat and tools
+- **read_only**: Read-only access, cannot modify data
+
+**User Roles:**
+Users are assigned roles via the `users` table `role` column. Default role is `user`.
+
+**Protected Endpoints:**
+- `/api/v1/admin/*` - Requires `admin` role
+- `/api/v1/prompts` (POST/PATCH/DELETE) - Requires `admin` role
+- `/api/v1/admin/users/{id}/quota` - Requires `admin` role
+
+**Role Hierarchy:**
+- `admin` (level 3) > `user` (level 2) > `read_only` (level 1)
+
+**Testing RBAC:**
+```bash
+# As admin
+curl -H "X-User-ID: admin1" -H "X-Role: admin" \
+  http://localhost:3001/api/v1/admin/metrics
+
+# As user (should return 403)
+curl -H "X-User-ID: user1" -H "X-Role: user" \
+  http://localhost:3001/api/v1/admin/metrics
+```
 
 ## Support
 

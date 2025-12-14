@@ -2,7 +2,7 @@
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from typing import List, Dict, Optional, Any
-from app.clients.vectorstore.rag_with_provenance import retrieve_with_provenance, format_provenance
+from app.rag.retriever import retrieve_chunks, format_rag_response
 from app.clients.llm import generate_chat_completion, LLMMessage, LLMRequestOptions
 import os
 
@@ -25,10 +25,9 @@ async def rag_chat_with_provenance(request: RAGChatRequest):
     """
     try:
         # Retrieve chunks with provenance
-        chunks = await retrieve_with_provenance(
-            request.query,
+        chunks = await retrieve_chunks(
+            query=request.query,
             top_k=request.top_k,
-            chunk_size=request.chunk_size,
         )
         
         if not chunks:
@@ -37,39 +36,27 @@ async def rag_chat_with_provenance(request: RAGChatRequest):
                 "provenance": [],
             }
         
-        # Build context from chunks
-        context = "\n\n".join([
-            f"[Source: {chunk.filename}]\n{chunk.text}"
-            for chunk in chunks
-        ])
-        
-        # Generate response with LLM
-        prompt = f"""Based on the following knowledge base documents, answer the question.
-
-Knowledge Base:
-{context}
-
-Question: {request.query}
-
-Answer based on the documents above. If the documents don't contain the answer, say so."""
-        
-        response = await generate_chat_completion(
-            LLMRequestOptions(
-                model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
-                messages=[
-                    LLMMessage("system", "You are a helpful assistant that answers questions based on provided documents."),
-                    LLMMessage("user", prompt),
-                ],
-                max_tokens=500,
-                temperature=0.3,
-            )
+        # Format response with RAG
+        response_text = await format_rag_response(
+            chunks=chunks,
+            query=request.query,
+            tone="warm",
         )
         
-        # Format provenance
-        provenance = format_provenance(chunks, top_n=3)
+        # Format provenance from chunks
+        provenance = [
+            {
+                "source": chunk.get("source", "unknown"),
+                "filename": chunk.get("filename", "unknown"),
+                "fragment_index": chunk.get("fragment_index", 0),
+                "score": round(chunk.get("score", 0.0), 3),
+                "snippet": chunk.get("snippet", chunk.get("content", "")[:200]),
+            }
+            for chunk in chunks[:3]  # Top 3 for provenance
+        ]
         
         return {
-            "response": response.content,
+            "response": response_text,
             "provenance": provenance,
         }
         

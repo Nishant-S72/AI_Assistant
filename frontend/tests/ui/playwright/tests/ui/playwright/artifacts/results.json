@@ -1,0 +1,366 @@
+{
+  "config": {
+    "configFile": "/Users/nishantsangwan/Documents/Repos/AI_Assistant/frontend/tests/ui/playwright/playwright.config.ts",
+    "rootDir": "/Users/nishantsangwan/Documents/Repos/AI_Assistant/frontend/tests/ui/playwright",
+    "forbidOnly": false,
+    "fullyParallel": true,
+    "globalSetup": "/Users/nishantsangwan/Documents/Repos/AI_Assistant/frontend/tests/ui/playwright/setup.ts",
+    "globalTeardown": null,
+    "globalTimeout": 0,
+    "grep": {},
+    "grepInvert": null,
+    "maxFailures": 0,
+    "metadata": {
+      "actualWorkers": 1
+    },
+    "preserveOutput": "always",
+    "reporter": [
+      [
+        "list",
+        null
+      ],
+      [
+        "html",
+        {
+          "outputFolder": "tests/ui/playwright/artifacts/html-report"
+        }
+      ],
+      [
+        "json",
+        {
+          "outputFile": "tests/ui/playwright/artifacts/results.json"
+        }
+      ],
+      [
+        "junit",
+        {
+          "outputFile": "tests/ui/playwright/artifacts/junit.xml"
+        }
+      ]
+    ],
+    "reportSlowTests": {
+      "max": 5,
+      "threshold": 300000
+    },
+    "quiet": false,
+    "projects": [
+      {
+        "outputDir": "/Users/nishantsangwan/Documents/Repos/AI_Assistant/frontend/tests/ui/playwright/tests/ui/playwright/artifacts/test-results",
+        "repeatEach": 1,
+        "retries": 0,
+        "metadata": {
+          "actualWorkers": 1
+        },
+        "id": "chromium",
+        "name": "chromium",
+        "testDir": "/Users/nishantsangwan/Documents/Repos/AI_Assistant/frontend/tests/ui/playwright",
+        "testIgnore": [],
+        "testMatch": [
+          "**/*.@(spec|test).?(c|m)[jt]s?(x)"
+        ],
+        "timeout": 60000
+      },
+      {
+        "outputDir": "/Users/nishantsangwan/Documents/Repos/AI_Assistant/frontend/tests/ui/playwright/tests/ui/playwright/artifacts/test-results",
+        "repeatEach": 1,
+        "retries": 0,
+        "metadata": {
+          "actualWorkers": 1
+        },
+        "id": "firefox",
+        "name": "firefox",
+        "testDir": "/Users/nishantsangwan/Documents/Repos/AI_Assistant/frontend/tests/ui/playwright",
+        "testIgnore": [],
+        "testMatch": [
+          "**/*.@(spec|test).?(c|m)[jt]s?(x)"
+        ],
+        "timeout": 60000
+      },
+      {
+        "outputDir": "/Users/nishantsangwan/Documents/Repos/AI_Assistant/frontend/tests/ui/playwright/tests/ui/playwright/artifacts/test-results",
+        "repeatEach": 1,
+        "retries": 0,
+        "metadata": {
+          "actualWorkers": 1
+        },
+        "id": "webkit",
+        "name": "webkit",
+        "testDir": "/Users/nishantsangwan/Documents/Repos/AI_Assistant/frontend/tests/ui/playwright",
+        "testIgnore": [],
+        "testMatch": [
+          "**/*.@(spec|test).?(c|m)[jt]s?(x)"
+        ],
+        "timeout": 60000
+      },
+      {
+        "outputDir": "/Users/nishantsangwan/Documents/Repos/AI_Assistant/frontend/tests/ui/playwright/tests/ui/playwright/artifacts/test-results",
+        "repeatEach": 1,
+        "retries": 0,
+        "metadata": {
+          "actualWorkers": 1
+        },
+        "id": "mobile-chrome",
+        "name": "mobile-chrome",
+        "testDir": "/Users/nishantsangwan/Documents/Repos/AI_Assistant/frontend/tests/ui/playwright",
+        "testIgnore": [],
+        "testMatch": [
+          "**/*.@(spec|test).?(c|m)[jt]s?(x)"
+        ],
+        "timeout": 60000
+      },
+      {
+        "outputDir": "/Users/nishantsangwan/Documents/Repos/AI_Assistant/frontend/tests/ui/playwright/tests/ui/playwright/artifacts/test-results",
+        "repeatEach": 1,
+        "retries": 0,
+        "metadata": {
+          "actualWorkers": 1
+        },
+        "id": "mobile-safari",
+        "name": "mobile-safari",
+        "testDir": "/Users/nishantsangwan/Documents/Repos/AI_Assistant/frontend/tests/ui/playwright",
+        "testIgnore": [],
+        "testMatch": [
+          "**/*.@(spec|test).?(c|m)[jt]s?(x)"
+        ],
+        "timeout": 60000
+      },
+      {
+        "outputDir": "/Users/nishantsangwan/Documents/Repos/AI_Assistant/frontend/tests/ui/playwright/tests/ui/playwright/artifacts/test-results",
+        "repeatEach": 1,
+        "retries": 0,
+        "metadata": {
+          "actualWorkers": 1
+        },
+        "id": "tablet",
+        "name": "tablet",
+        "testDir": "/Users/nishantsangwan/Documents/Repos/AI_Assistant/frontend/tests/ui/playwright",
+        "testIgnore": [],
+        "testMatch": [
+          "**/*.@(spec|test).?(c|m)[jt]s?(x)"
+        ],
+        "timeout": 60000
+      }
+    ],
+    "shard": null,
+    "tags": [],
+    "updateSnapshots": "missing",
+    "updateSourceMethod": "patch",
+    "version": "1.57.0",
+    "workers": 1,
+    "webServer": null
+  },
+  "suites": [
+    {
+      "title": "test_scheduler_flow.spec.ts",
+      "file": "test_scheduler_flow.spec.ts",
+      "column": 0,
+      "line": 0,
+      "specs": [],
+      "suites": [
+        {
+          "title": "Scheduler Flow",
+          "file": "test_scheduler_flow.spec.ts",
+          "line": 9,
+          "column": 6,
+          "specs": [
+            {
+              "title": "should parse natural language and show preview",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 60000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "chromium",
+                  "projectName": "chromium",
+                  "results": [
+                    {
+                      "workerIndex": 0,
+                      "parallelIndex": 0,
+                      "status": "passed",
+                      "duration": 1916,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2025-12-07T01:08:07.306Z",
+                      "annotations": [],
+                      "attachments": [
+                        {
+                          "name": "scheduler-parse-preview-expected.png",
+                          "contentType": "image/png",
+                          "path": "/Users/nishantsangwan/Documents/Repos/AI_Assistant/frontend/tests/ui/playwright/test_scheduler_flow.spec.ts-snapshots/scheduler-parse-preview-chromium-darwin.png"
+                        },
+                        {
+                          "name": "scheduler-parse-preview-actual.png",
+                          "contentType": "image/png",
+                          "path": "/Users/nishantsangwan/Documents/Repos/AI_Assistant/frontend/tests/ui/playwright/tests/ui/playwright/artifacts/test-results/test_scheduler_flow-Schedu-a45dd-l-language-and-show-preview-chromium/scheduler-parse-preview-actual.png"
+                        },
+                        {
+                          "name": "scheduler-parse-preview-diff.png",
+                          "contentType": "image/png",
+                          "path": "/Users/nishantsangwan/Documents/Repos/AI_Assistant/frontend/tests/ui/playwright/tests/ui/playwright/artifacts/test-results/test_scheduler_flow-Schedu-a45dd-l-language-and-show-preview-chromium/scheduler-parse-preview-diff.png"
+                        }
+                      ]
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "303e4a212cc0a197a631-454e110460ab67361528",
+              "file": "test_scheduler_flow.spec.ts",
+              "line": 15,
+              "column": 7
+            },
+            {
+              "title": "should create event and show confirmation",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 60000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "chromium",
+                  "projectName": "chromium",
+                  "results": [
+                    {
+                      "workerIndex": 0,
+                      "parallelIndex": 0,
+                      "status": "passed",
+                      "duration": 608,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2025-12-07T01:08:09.682Z",
+                      "annotations": [],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "303e4a212cc0a197a631-0fa56a85909aa2cb3130",
+              "file": "test_scheduler_flow.spec.ts",
+              "line": 78,
+              "column": 7
+            },
+            {
+              "title": "should show conflict alternatives when freebusy indicates conflict",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 60000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "chromium",
+                  "projectName": "chromium",
+                  "results": [
+                    {
+                      "workerIndex": 0,
+                      "parallelIndex": 0,
+                      "status": "passed",
+                      "duration": 574,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2025-12-07T01:08:10.297Z",
+                      "annotations": [],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "303e4a212cc0a197a631-7faa49bef4760372ce6b",
+              "file": "test_scheduler_flow.spec.ts",
+              "line": 123,
+              "column": 7
+            },
+            {
+              "title": "should create recurring event",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 60000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "chromium",
+                  "projectName": "chromium",
+                  "results": [
+                    {
+                      "workerIndex": 0,
+                      "parallelIndex": 0,
+                      "status": "passed",
+                      "duration": 637,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2025-12-07T01:08:10.879Z",
+                      "annotations": [],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "303e4a212cc0a197a631-bf88632526fcab040020",
+              "file": "test_scheduler_flow.spec.ts",
+              "line": 168,
+              "column": 7
+            },
+            {
+              "title": "should schedule reminder when creating event",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 60000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "chromium",
+                  "projectName": "chromium",
+                  "results": [
+                    {
+                      "workerIndex": 0,
+                      "parallelIndex": 0,
+                      "status": "passed",
+                      "duration": 623,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2025-12-07T01:08:11.522Z",
+                      "annotations": [],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "303e4a212cc0a197a631-591e88e28d6c09ce23e4",
+              "file": "test_scheduler_flow.spec.ts",
+              "line": 208,
+              "column": 7
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "errors": [],
+  "stats": {
+    "startTime": "2025-12-07T01:08:06.820Z",
+    "duration": 5360.099999999999,
+    "expected": 5,
+    "skipped": 0,
+    "unexpected": 0,
+    "flaky": 0
+  }
+}

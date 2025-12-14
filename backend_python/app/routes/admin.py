@@ -376,6 +376,20 @@ async def seed_rag_test_messages_endpoint(_: str = Depends(require_auth)):
                             msg["created_at"]
                         )
                     
+                    # Invalidate cache for this contact and thread
+                    from app.services.cache_manager import invalidate_cache
+                    from datetime import datetime
+                    try:
+                        msg_timestamp = datetime.fromisoformat(msg["created_at"].replace('Z', '+00:00')) if isinstance(msg["created_at"], str) else msg.get("created_at")
+                        invalidate_cache(
+                            reason="new_message",
+                            contact_id=contact_id,
+                            thread_id=thread_id,
+                            message_timestamp=msg_timestamp
+                        )
+                    except Exception as cache_error:
+                        print(f"[Seed] Failed to invalidate cache: {cache_error}")
+                    
                     # Trigger tag update in background after creating messages
                     try:
                         from app.services.contact_tags import update_contact_tags
@@ -493,6 +507,19 @@ async def seed_tag_test_messages_endpoint(_: str = Depends(require_auth)):
                             "email",
                             msg["created_at"]
                         )
+                    
+                    # Invalidate cache for this contact and thread
+                    from app.services.cache_manager import invalidate_cache
+                    try:
+                        msg_timestamp = datetime.fromisoformat(msg["created_at"].replace('Z', '+00:00')) if isinstance(msg["created_at"], str) else msg.get("created_at")
+                        invalidate_cache(
+                            reason="new_message",
+                            contact_id=contact_id,
+                            thread_id=thread_id,
+                            message_timestamp=msg_timestamp
+                        )
+                    except Exception as cache_error:
+                        print(f"[Seed] Failed to invalidate cache: {cache_error}")
                     
                     # Trigger AI tag generation in background after creating messages
                     # LLM will analyze conversation history and generate tags based on criteria

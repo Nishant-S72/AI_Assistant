@@ -40,13 +40,74 @@ PORT=3001
 # Optional
 USE_DUMMY_INBOX=true
 REDIS_URL=redis://localhost:6379
+
+# Scheduling Assistant (New)
+NEW_SCHEDULER_ENABLED=true
+GOOGLE_CLIENT_ID=your_google_client_id
+GOOGLE_CLIENT_SECRET=your_google_client_secret
+OUTLOOK_CLIENT_ID=your_outlook_client_id
+OUTLOOK_CLIENT_SECRET=your_outlook_client_secret
+
+# APScheduler (for reminders)
+SCHEDULER_DB_URL=sqlite:///./scheduler_jobs.db
 ```
 
 ### Database Setup
 
 The database schema and migrations are the same as the TypeScript version. SQL files are located in:
-- `backend/db/migrations/` - Migration files
-- `backend/src/db/schema.sql` - Main schema
+- `db/migrations/` - Migration files
+
+Run migrations:
+```bash
+# Migrations are applied automatically on server start
+# Or manually using psql:
+psql $DATABASE_URL -f db/migrations/006_create_scheduler_tables.sql
+```
+
+## Scheduling Assistant
+
+The new Scheduling Assistant provides calendar integration with Google Calendar and Microsoft Outlook.
+
+### Features
+
+- **Natural Language Scheduling**: Use LLM function-calling to parse scheduling requests
+- **Calendar Integration**: Connect Google Calendar or Outlook via OAuth
+- **Event Management**: Create, update, cancel, and reschedule events
+- **Reminders**: Schedule reminders via APScheduler (email, Slack, in-app)
+- **Availability Search**: Find free time slots using free/busy API
+- **Event Mirroring**: Events are mirrored to local DB for quick reads
+
+### API Endpoints
+
+- `POST /api/v1/scheduler/chat` - Natural language scheduling chat
+- `POST /api/v1/scheduler/parse` - Parse natural language to structured event
+- `POST /api/v1/scheduler/create_event` - Create calendar event
+- `GET /api/v1/scheduler/events` - List events from event_mirror
+- `POST /api/v1/scheduler/reschedule/{event_id}` - Reschedule event
+- `POST /api/v1/scheduler/cancel_event/{event_id}` - Cancel event
+- `POST /api/v1/scheduler/connect/google` - Get Google OAuth URL
+- `POST /api/v1/scheduler/connect/outlook` - Get Outlook OAuth URL
+
+### OAuth Setup
+
+1. **Google Calendar**:
+   - Create OAuth 2.0 credentials in Google Cloud Console
+   - Add redirect URI: `http://localhost:3000/calendar-connect/callback`
+   - Set `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET`
+
+2. **Microsoft Outlook**:
+   - Register app in Azure Portal
+   - Add redirect URI: `http://localhost:3000/calendar-connect/callback`
+   - Set `OUTLOOK_CLIENT_ID` and `OUTLOOK_CLIENT_SECRET`
+
+### Migration from Chat Bubble Scheduler
+
+The old chat-bubble scheduler has been removed. Calendar scheduling is now handled by the dedicated scheduler API and UI:
+
+- **Old**: Chat bubble would create events via `/api/calendar/parse` and `/api/calendar/events`
+- **New**: Use `/api/v1/scheduler/chat` or the Calendar page UI
+
+The old endpoints are deprecated but still available for backward compatibility.
 
 Run migrations automatically on startup, or manually:
 

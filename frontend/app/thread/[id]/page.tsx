@@ -25,7 +25,7 @@ export default function ThreadPage() {
         setContact(threadData.contact);
         
         if (threadData.contact.id) {
-          const taskData = await api.getTasks();
+          const taskData = await api.tasks.getTasks();
           setTasks(taskData.filter((t) => t.contact_id === threadData.contact.id));
         }
       } catch (error) {

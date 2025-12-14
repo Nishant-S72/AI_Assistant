@@ -7,7 +7,7 @@
 
 import { useState, useRef, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { chat, ChatResponse, Citation } from '@/lib/api';
+import { chat, chatV1, ChatResponse, Citation } from '@/lib/api';
 import AiThinkingDots from './AiThinkingDots';
 import { BookOpen, AlertTriangle } from 'lucide-react';
 
@@ -19,12 +19,26 @@ interface Message {
   suggestionId?: string | null;
   escalated?: boolean;
   escalationReasons?: string[];
-  intent?: 'policy_intent' | 'action_intent' | 'general_intent';
+  intent?: 'policy_intent' | 'action_intent' | 'general_intent' | 'general' | 'rag' | 'action_candidate';
+  action_plan?: {
+    action_type: string;
+    parameters: any;
+    confidence: number;
+    missing_fields: string[];
+  };
+  action_execution?: {
+    executed: boolean;
+    result?: any;
+    error?: string;
+    reason?: string;
+  };
   action_suggestion?: {
     action_type: string;
     confirm_needed: boolean;
     extracted_data?: any;
   };
+  tier?: 'assist' | 'pro';
+  kind?: 'assistant' | 'suggestion' | 'action_planned' | 'action_executed';
 }
 
 export default function FloatingChatbox() {
@@ -41,6 +55,7 @@ export default function FloatingChatbox() {
   const [tone, setTone] = useState<'formal' | 'warm' | 'crisp'>('warm');
   const [showSources, setShowSources] = useState<number | null>(null);
   const [escalated, setEscalated] = useState(false);
+  const [userTier, setUserTier] = useState<'assist' | 'pro'>('assist');
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const lastActivityRef = useRef<Date>(new Date());
@@ -132,11 +147,17 @@ export default function FloatingChatbox() {
     }, 3600000);
 
     try {
-      const response = await chat.sendMessage({
+      // Use new Phase 1 chat API
+      const response = await chatV1.chat({
         threadId: threadIdRef.current || undefined,
         userMessage: userMessage.content,
         tone,
       });
+
+      // Update user tier from response
+      if (response.tier) {
+        setUserTier(response.tier);
+      }
 
       // Check for escalation
       if (response.escalated) {
@@ -151,27 +172,25 @@ export default function FloatingChatbox() {
         suggestionId: response.suggestionId,
         escalated: response.escalated,
         intent: response.intent,
+        action_plan: response.action_plan,
+        action_execution: response.action_execution,
         action_suggestion: response.action_suggestion,
+        tier: response.tier,
+        kind: response.kind,
       };
 
       setMessages((prev) => [...prev, assistantMessage]);
 
-      // Send feedback automatically (accepted)
-      if (response.suggestionId) {
-        try {
-          await chat.sendFeedback({
-            suggestionId: response.suggestionId,
-            accepted: true,
-          });
-        } catch (e) {
-          console.warn('Failed to send feedback:', e);
+      // Handle action execution results
+      if (response.action_execution?.executed) {
+        // Dispatch calendar refresh if calendar event was created
+        if (response.action_plan?.action_type === 'create_calendar_event' && response.action_execution.result?.id) {
+          if (typeof window !== 'undefined') {
+            window.dispatchEvent(new CustomEvent('calendarEventCreated', {
+              detail: { eventId: response.action_execution.result.id }
+            }));
+          }
         }
-      }
-      
-      // Handle action confirmations
-      if (response.action_suggestion?.confirm_needed && response.action_suggestion.extracted_data) {
-        // Could show confirmation buttons here
-        console.log('[Chat] Action requires confirmation:', response.action_suggestion);
       }
     } catch (error: any) {
       console.error('Chat error:', error);
@@ -269,15 +288,74 @@ export default function FloatingChatbox() {
                         : 'bg-white/60 dark:bg-[var(--card-bg)] border border-[var(--glass-border)] text-theme-primary'
                     }`}
                   >
-                    {/* Policy Badge */}
-                    {msg.intent === 'policy_intent' && (
+                    {/* Intent Badge */}
+                    {msg.intent === 'rag' && (
                       <div className="mb-2 flex items-center gap-1.5 text-xs text-blue-600">
                         <BookOpen className="w-3 h-3" />
-                        <span className="font-medium">Policy-backed answer</span>
+                        <span className="font-medium">RAG-backed answer</span>
+                      </div>
+                    )}
+                    {msg.kind === 'action_planned' && (
+                      <div className="mb-2 flex items-center gap-1.5 text-xs text-amber-600">
+                        <AlertTriangle className="w-3 h-3" />
+                        <span className="font-medium">Suggested Action</span>
+                      </div>
+                    )}
+                    {msg.kind === 'action_executed' && (
+                      <div className="mb-2 flex items-center gap-1.5 text-xs text-green-600">
+                        <span className="font-medium">✓ Action Executed</span>
                       </div>
                     )}
                     
                     <p className="text-sm leading-relaxed whitespace-pre-wrap">{msg.content}</p>
+                    
+                    {/* Action Plan Display */}
+                    {msg.action_plan && !msg.action_execution?.executed && (
+                      <div className="mt-3 p-2 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 rounded-lg">
+                        <p className="text-xs font-semibold text-amber-800 dark:text-amber-200 mb-1">
+                          Planned: {msg.action_plan.action_type}
+                        </p>
+                        {msg.action_plan.missing_fields && msg.action_plan.missing_fields.length > 0 && (
+                          <p className="text-xs text-amber-700 dark:text-amber-300 mb-2">
+                            Missing: {msg.action_plan.missing_fields.join(', ')}
+                          </p>
+                        )}
+                        {userTier === 'pro' && msg.action_plan.missing_fields?.length === 0 && (
+                          <button
+                            onClick={async () => {
+                              try {
+                                const result = await chatV1.executeAction(msg.action_plan!);
+                                if (result.executed) {
+                                  // Update message to show execution
+                                  setMessages((prev) =>
+                                    prev.map((m, idx) =>
+                                      idx === messages.length - 1
+                                        ? {
+                                            ...m,
+                                            kind: 'action_executed',
+                                            action_execution: result,
+                                            content: `It's done. ${msg.action_plan!.action_type} completed successfully.`,
+                                          }
+                                        : m
+                                    )
+                                  );
+                                }
+                              } catch (error: any) {
+                                console.error('Action execution failed:', error);
+                              }
+                            }}
+                            className="mt-2 px-3 py-1.5 bg-[var(--primary)] text-white text-xs rounded hover:opacity-90 transition-opacity"
+                          >
+                            Approve & Execute
+                          </button>
+                        )}
+                        {userTier === 'assist' && (
+                          <p className="text-xs text-amber-700 dark:text-amber-300 mt-2">
+                            ⚠️ Not available on Assist tier
+                          </p>
+                        )}
+                      </div>
+                    )}
                     
                     {/* Citations */}
                     {msg.citations && msg.citations.length > 0 && (

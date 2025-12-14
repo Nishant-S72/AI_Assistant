@@ -23,9 +23,14 @@ from app.routes.v1 import (
     conversations,
     prompts as v1_prompts,
     admin as v1_admin,
+    scheduler,
+    calendar as v1_calendar,
 )
+from app.api import chat as v1_chat_api
 from app.routes.v1 import rag_with_provenance
 from app.middleware.rate_limit import RateLimitMiddleware
+from app.middleware.metrics import metrics_middleware
+from app.middleware.quota import quota_middleware
 
 load_dotenv()
 
@@ -47,6 +52,20 @@ async def lifespan(app: FastAPI):
     import asyncio
     agentic_chat.set_cleanup_task(asyncio.create_task(agentic_chat.start_cleanup_task()))
     
+    # Infer tasks from inbox messages on startup (background)
+    from app.services.task_inference import infer_tasks_from_messages
+    asyncio.create_task(infer_tasks_from_messages(limit=50))
+    print("[Startup] Triggered task inference from inbox messages")
+    
+    # Initialize APScheduler for reminders
+    from app.scheduler.apscheduler_manager import get_scheduler
+    get_scheduler()  # Initialize scheduler
+    print("[Startup] APScheduler initialized")
+    
+    # Register scheduling tools
+    from app.tools import scheduling_registry
+    print("[Startup] Scheduling tools registered")
+    
     yield
     
     # Shutdown
@@ -57,6 +76,11 @@ async def lifespan(app: FastAPI):
             await cleanup_task
         except asyncio.CancelledError:
             pass
+    
+    # Shutdown scheduler
+    from app.scheduler.apscheduler_manager import shutdown_scheduler
+    shutdown_scheduler()
+    
     await close_pool()
 
 
@@ -78,6 +102,8 @@ app.add_middleware(
 
 # Rate limiting middleware
 app.add_middleware(RateLimitMiddleware)
+app.middleware("http")(metrics_middleware)
+app.middleware("http")(quota_middleware)
 
 # Include routers
 app.include_router(messages.router, prefix="/api/messages", tags=["messages"])
@@ -97,6 +123,9 @@ app.include_router(conversations.router, prefix="/api/v1/conversations", tags=["
 app.include_router(v1_prompts.router, prefix="/api/v1/prompts", tags=["v1-prompts"])
 app.include_router(v1_admin.router, prefix="/api/v1/admin", tags=["v1-admin"])
 app.include_router(rag_with_provenance.router, prefix="/api/v1", tags=["v1-rag"])
+app.include_router(scheduler.router, prefix="/api/v1/scheduler", tags=["v1-scheduler"])
+app.include_router(v1_calendar.router, tags=["v1-calendar"])
+app.include_router(v1_chat_api.router, prefix="/api/v1/chat", tags=["v1-chat-new"])
 
 
 @app.get("/")

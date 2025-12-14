@@ -33,12 +33,13 @@ async def generate_chat_completion(
     
     # Response wrapper class
     class Response:
-        def __init__(self, content, model, usage, correlation_id, adapter):
+        def __init__(self, content, model, usage, correlation_id, adapter, function_call=None):
             self.content = content
             self.model = model
             self.usage = usage
             self.correlation_id = correlation_id
             self.adapter = adapter
+            self.function_call = function_call
 
     # Try OpenAI first (primary LLM)
     if os.getenv("OPENAI_API_KEY"):
@@ -47,7 +48,7 @@ async def generate_chat_completion(
             result = await generate_with_openai(options)
             latency = int((time.time() - start_time) * 1000)
             print(f"[LLM] OpenAI success ({latency}ms) - correlationId: {correlation_id}")
-            return Response(result.content, result.model, result.usage, correlation_id, "openai")
+            return Response(result.content, result.model, result.usage, correlation_id, "openai", result.function_call)
         except Exception as error:
             error_msg = str(error)
             errors.append({"adapter": "openai", "error": error_msg})

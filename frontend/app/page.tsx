@@ -10,12 +10,13 @@ import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { motion } from 'framer-motion';
-import { getSummary, SummaryResponse } from '@/lib/api';
+import { getSummary, SummaryResponse, api, Task } from '@/lib/api';
 import { TaskPriorityList } from '@/components/TaskPriorityList';
-import { TaskPriorityBadge } from '@/components/TaskPriorityBadge';
+import { TaskPriorityBadge, Priority } from '@/components/TaskPriorityBadge';
 import { useAppStore } from '@/lib/store';
 import GlassCard from '@/components/GlassCard';
 import { userMetadata } from '@/lib/userMetadata';
+import { formatDate } from '@/lib/utils';
 
 // Dynamic greeting based on time of day
 function getGreeting() {
@@ -67,6 +68,7 @@ export default function Home() {
   const [generatingCategorySummary, setGeneratingCategorySummary] = useState(false);
   const [taskFilter, setTaskFilter] = useState<'all' | 'P0' | 'P1' | 'P2'>('all');
   const [showAISummary, setShowAISummary] = useState(false);
+  const [taskReminders, setTaskReminders] = useState<Task[]>([]);
 
   // Poll for summary if it's being generated
   const pollForSummary = async () => {
@@ -135,7 +137,20 @@ export default function Home() {
       setSummary(summaryCache);
       setLoading(false);
     }
+    loadTaskReminders();
+    // Refresh reminders every 5 minutes
+    const interval = setInterval(loadTaskReminders, 5 * 60 * 1000);
+    return () => clearInterval(interval);
   }, []); // Only run on mount
+
+  const loadTaskReminders = async () => {
+    try {
+      const reminders = await api.tasks.getReminders();
+      setTaskReminders(reminders);
+    } catch (error) {
+      console.error('Error loading task reminders:', error);
+    }
+  };
 
   const loadSummary = async (force = false) => {
     // Check cache first unless forcing refresh
@@ -694,6 +709,87 @@ export default function Home() {
           </motion.div>
         </div>
           </>
+        )}
+
+        {/* Task Reminders Section */}
+        {taskReminders.length > 0 && (
+          <motion.div
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.3, delay: 0.25 }}
+          >
+            <GlassCard className="p-8">
+              <div className="flex items-center justify-between mb-6">
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 bg-gradient-to-br from-amber-400/20 to-orange-400/20 rounded-xl flex items-center justify-center">
+                    <span className="text-2xl">⏰</span>
+                  </div>
+                  <h2 className="text-2xl font-semibold text-theme-primary heading-premium">
+                    Upcoming Task Reminders
+                  </h2>
+                </div>
+                <span className="px-3 py-1 bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300 rounded-full text-sm font-semibold">
+                  {taskReminders.length}
+                </span>
+              </div>
+              
+              <div className="space-y-3">
+                {taskReminders.slice(0, 5).map((task) => {
+                  const timeUntil = task.time_until_due;
+                  const timeStr = timeUntil
+                    ? timeUntil.days > 0
+                      ? `${timeUntil.days} day${timeUntil.days > 1 ? 's' : ''}`
+                      : timeUntil.hours > 0
+                      ? `${timeUntil.hours} hour${timeUntil.hours > 1 ? 's' : ''}`
+                      : `${timeUntil.minutes} minute${timeUntil.minutes > 1 ? 's' : ''}`
+                    : 'Soon';
+                  
+                  return (
+                    <Link
+                      key={task.id}
+                      href={task.message_id ? `/thread/${task.message_id}` : task.thread_id ? `/thread/${task.thread_id}` : '/tasks'}
+                      className="block p-4 bg-white/60 dark:bg-[var(--card-bg)] rounded-xl border border-[var(--glass-border)] hover:bg-[var(--primary)]/10 hover:border-[var(--primary)]/30 transition-all"
+                    >
+                      <div className="flex items-start justify-between gap-4">
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-2 mb-1">
+                            <h4 className="text-base font-semibold text-theme-primary heading-premium">
+                              {task.title}
+                            </h4>
+                            {task.priority && (
+                              <TaskPriorityBadge priority={task.priority as Priority} variant="on-pane" />
+                            )}
+                          </div>
+                          {task.contact_name && (
+                            <p className="text-sm text-theme-muted mb-1">
+                              {task.contact_name}
+                            </p>
+                          )}
+                          <p className="text-xs text-theme-muted">
+                            Due: {formatDate(task.due_at!)} • {timeStr} remaining
+                          </p>
+                        </div>
+                        <span className="px-2 py-1 bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300 rounded text-xs font-semibold whitespace-nowrap">
+                          {timeStr}
+                        </span>
+                      </div>
+                    </Link>
+                  );
+                })}
+              </div>
+              
+              {taskReminders.length > 5 && (
+                <div className="mt-4 text-center">
+                  <Link
+                    href="/tasks"
+                    className="text-sm text-[var(--primary)] hover:underline font-medium"
+                  >
+                    View all {taskReminders.length} reminders →
+                  </Link>
+                </div>
+              )}
+            </GlassCard>
+          </motion.div>
         )}
 
         {/* Quick Actions */}

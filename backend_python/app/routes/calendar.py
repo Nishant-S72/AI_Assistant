@@ -1,5 +1,21 @@
-"""Calendar routes."""
-from fastapi import APIRouter, HTTPException, Query, Body
+"""
+Legacy calendar routes - DEPRECATED.
+
+NOTE: This module contains the old chat-bubble scheduler implementation.
+Calendar scheduling has been moved to the new scheduler at /api/v1/scheduler.
+
+These routes are kept for backward compatibility but are deprecated.
+New code should use:
+- /api/v1/scheduler/chat - For natural language scheduling
+- /api/v1/scheduler/create_event - For direct event creation
+- /api/v1/scheduler/events - For listing events from event_mirror
+
+Migration guide:
+- Old: POST /api/calendar/parse -> New: POST /api/v1/scheduler/parse
+- Old: POST /api/calendar/events -> New: POST /api/v1/scheduler/create_event
+- Old: GET /api/calendar/events -> New: GET /api/v1/scheduler/events
+"""
+from fastapi import APIRouter, HTTPException, Query, Body, Depends
 from typing import Optional, List, Dict, Any
 from pydantic import BaseModel
 from datetime import datetime, timedelta
@@ -9,6 +25,7 @@ from app.clients.llm import generate_chat_completion, LLMMessage, LLMRequestOpti
 import json
 import os
 import re
+import warnings
 
 
 class CreateEventRequest(BaseModel):
@@ -73,35 +90,97 @@ def generate_recurring_instances(event: Dict, start_date: datetime, end_date: da
 
 @router.get("/events")
 async def get_events(start: str = Query(...), end: str = Query(...)):
-    """Get events for a date range."""
+    """
+    Get events for a date range - DEPRECATED.
+    
+    This endpoint is deprecated. Use GET /api/v1/scheduler/events instead.
+    """
+    warnings.warn(
+        "GET /api/calendar/events is deprecated. Use GET /api/v1/scheduler/events instead.",
+        DeprecationWarning,
+        stacklevel=2
+    )
     try:
-        start_date = datetime.fromisoformat(start.replace("Z", "+00:00"))
-        end_date = datetime.fromisoformat(end.replace("Z", "+00:00"))
+        # Parse dates and ensure they're timezone-aware
+        start_str = start.replace("Z", "+00:00")
+        end_str = end.replace("Z", "+00:00")
+        
+        # Handle both timezone-aware and naive datetime strings
+        if "+" in start_str or start_str.endswith("Z"):
+            start_date = datetime.fromisoformat(start_str)
+        else:
+            # If naive, assume UTC
+            start_date = datetime.fromisoformat(start_str.replace("Z", "+00:00"))
+        
+        if "+" in end_str or end_str.endswith("Z"):
+            end_date = datetime.fromisoformat(end_str)
+        else:
+            # If naive, assume UTC
+            end_date = datetime.fromisoformat(end_str.replace("Z", "+00:00"))
+        
+        # Ensure both are timezone-aware (UTC)
+        from datetime import timezone
+        if start_date.tzinfo is None:
+            start_date = start_date.replace(tzinfo=timezone.utc)
+        if end_date.tzinfo is None:
+            end_date = end_date.replace(tzinfo=timezone.utc)
 
         pool = await get_pool()
         async with pool.acquire() as conn:
+            # Convert timezone-aware datetimes to UTC timestamps for comparison
+            # This avoids timezone comparison issues
+            start_ts = start_date.timestamp() if start_date.tzinfo else start_date.replace(tzinfo=timezone.utc).timestamp()
+            end_ts = end_date.timestamp() if end_date.tzinfo else end_date.replace(tzinfo=timezone.utc).timestamp()
+            
+            # Fetch events - compare timestamps to avoid timezone issues
             rows = await conn.fetch(
                 """
                 SELECT * FROM calendar_events 
-                WHERE (start_time >= $1 AND start_time <= $2)
-                   OR (is_recurring = true AND recurrence_end_date >= $1)
+                WHERE (
+                    EXTRACT(EPOCH FROM start_time) >= $1 
+                    AND EXTRACT(EPOCH FROM start_time) <= $2
+                )
+                OR (
+                    is_recurring = true 
+                    AND recurrence_end_date IS NOT NULL
+                    AND EXTRACT(EPOCH FROM recurrence_end_date) >= $1
+                )
                 ORDER BY start_time ASC
                 """,
-                start_date,
-                end_date,
+                start_ts,
+                end_ts,
             )
 
         # Expand recurring events
         events = []
         for row in rows:
             event = dict(row)
+            # Convert datetime objects to ISO strings for JSON serialization
+            if isinstance(event.get("start_time"), datetime):
+                event["start_time"] = event["start_time"].isoformat()
+            if isinstance(event.get("end_time"), datetime):
+                event["end_time"] = event["end_time"].isoformat()
+            if isinstance(event.get("created_at"), datetime):
+                event["created_at"] = event["created_at"].isoformat()
+            if isinstance(event.get("updated_at"), datetime):
+                event["updated_at"] = event["updated_at"].isoformat()
+            if isinstance(event.get("recurrence_end_date"), datetime):
+                event["recurrence_end_date"] = event["recurrence_end_date"].isoformat()
+            
             if event.get("is_recurring") and event.get("recurrence_pattern"):
                 instances = generate_recurring_instances(event, start_date, end_date)
                 events.extend(instances)
             else:
                 events.append(event)
 
-        events.sort(key=lambda e: datetime.fromisoformat(e["start_time"].replace("Z", "+00:00")))
+        # Sort events by start_time (handle both string and datetime)
+        def get_start_time(e):
+            start = e.get("start_time")
+            if isinstance(start, str):
+                return datetime.fromisoformat(start.replace("Z", "+00:00"))
+            return start
+        
+        events.sort(key=get_start_time)
         return {"events": events}
     except Exception as error:
         print(f"Error fetching calendar events: {error}")
@@ -110,7 +189,16 @@ async def get_events(start: str = Query(...), end: str = Query(...)):
 
 @router.post("/events")
 async def create_event(request: CreateEventRequest):
-    """Create a new calendar event (Google Calendar or simulated)."""
+    """
+    Create a new calendar event - DEPRECATED.
+    
+    This endpoint is deprecated. Use POST /api/v1/scheduler/create_event instead.
+    """
+    warnings.warn(
+        "POST /api/calendar/events is deprecated. Use POST /api/v1/scheduler/create_event instead.",
+        DeprecationWarning,
+        stacklevel=2
+    )
     try:
         if not request.title or not request.start or not request.end:
             raise HTTPException(status_code=400, detail="Title, start, and end are required")
@@ -239,9 +327,10 @@ async def create_event(request: CreateEventRequest):
 
 
 
-async def parse_event_text(text: str) -> Dict[str, Any]:
+async def parse_event_text(text: str, conversation_history: Optional[List[Dict[str, str]]] = None) -> Dict[str, Any]:
     """
     Parse natural language text to extract calendar event details.
+    Uses conversation history for context (e.g., previous mentions of meeting title, duration).
     Returns dict with 'event' (if successful) or 'missing_fields' and 'clarifying_question'.
     This is a helper function that can be called from other routes.
     """
@@ -251,48 +340,89 @@ async def parse_event_text(text: str) -> Dict[str, Any]:
             "clarifying_question": "What would you like to schedule, and when?",
         }
     
+    # Build context from conversation history
+    context_text = ""
+    if conversation_history:
+        # Get last 5 messages for context
+        recent_messages = conversation_history[-5:] if len(conversation_history) > 5 else conversation_history
+        for msg in recent_messages:
+            role = msg.get("role", "")
+            content = msg.get("content", "")
+            if role == "user":
+                context_text += f"User: {content}\n"
+            elif role == "assistant":
+                context_text += f"Assistant: {content}\n"
+    
     now = datetime.now()
     tomorrow = now + timedelta(days=1)
     tomorrow_date_str = tomorrow.strftime("%Y-%m-%d")
+    today_date_str = now.strftime("%Y-%m-%d")
+    default_time = now.replace(hour=14, minute=0, second=0, microsecond=0)  # 2pm today
     
-    system_prompt = f"""You are a strict JSON parser. Extract calendar event details from natural language.
+    # Build context-aware prompt
+    context_instruction = ""
+    if context_text:
+        context_instruction = f"""
+CONVERSATION CONTEXT (use this to fill in missing details):
+{context_text}
+
+IMPORTANT: Extract information from the conversation context:
+- If a meeting title was mentioned earlier (e.g., "POC meeting"), use it
+- If duration was mentioned (e.g., "1 hour"), use it
+- If participants were mentioned (e.g., "no participants", "just me"), use empty array []
+- If date/time was mentioned earlier, use it
+"""
+    
+    system_prompt = f"""You are a helpful calendar assistant. Extract calendar event details from natural language and conversation context.
 
 CRITICAL RULES:
 1. Return ONLY valid JSON - no explanations, no markdown, no code blocks
 2. Start with {{ and end with }}
 3. Use double quotes for all strings
 4. Calculate dates relative to: {now.isoformat()}
-5. Tomorrow is: {tomorrow_date_str}
-
+5. Today is: {today_date_str}, Tomorrow is: {tomorrow_date_str}
+6. USE SMART DEFAULTS - don't ask for clarification, just use reasonable defaults:
+   - If no title: use "Meeting" or extract from context
+   - If no time: use today at 2pm (14:00) or extract from context
+   - If no duration: default to 1 hour
+   - If no attendees mentioned: use empty array []
+   - If user said "no participants" or "just me": use empty array []
+{context_instruction}
 JSON Schema:
 {{
-  "title": "string (required)",
-  "start_time": "ISO 8601 datetime (required)",
-  "end_time": "ISO 8601 datetime (required, default: 1 hour after start)",
+  "title": "string (required - use 'Meeting' if not specified)",
+  "start_time": "ISO 8601 datetime (required - use today at 2pm if not specified)",
+  "end_time": "ISO 8601 datetime (required - default: 1 hour after start_time)",
   "description": "string or null",
-  "is_recurring": "boolean",
+  "is_recurring": "boolean (default: false)",
   "recurrence_pattern": "daily|weekly|monthly|yearly or null",
   "recurrence_interval": "number (default 1)",
   "location": "string or null",
-  "attendees": "array of strings or null"
+  "attendees": "array of strings or [] (use [] if not mentioned or user said 'no participants')"
 }}
 
 Examples (copy format exactly):
-"Meeting tomorrow at 2pm" → {{"title":"Meeting","start_time":"{tomorrow_date_str}T14:00:00","end_time":"{tomorrow_date_str}T15:00:00"}}
-"Standup every Monday 9am" → {{"title":"Standup","start_time":"2024-11-25T09:00:00","end_time":"2024-11-25T09:30:00","is_recurring":true,"recurrence_pattern":"weekly"}}
+"Meeting tomorrow at 2pm" → {{"title":"Meeting","start_time":"{tomorrow_date_str}T14:00:00","end_time":"{tomorrow_date_str}T15:00:00","attendees":[]}}
+"Schedule the POC meeting" (if context mentions "POC meeting" and "1 hour") → {{"title":"POC meeting","start_time":"{today_date_str}T14:00:00","end_time":"{today_date_str}T15:00:00","attendees":[]}}
+"no, just schedule the POC meeting" (if context mentions "POC meeting", "1 hour", "no participants") → {{"title":"POC meeting","start_time":"{today_date_str}T14:00:00","end_time":"{today_date_str}T15:00:00","attendees":[]}}
 
 Return ONLY the JSON object, nothing else."""
 
     try:
+        # Build user message with context
+        user_message = text
+        if context_text:
+            user_message = f"Conversation context:\n{context_text}\n\nCurrent message: {text}\n\nExtract calendar event details from the current message and conversation context above."
+        
         llm_response = await generate_chat_completion(
             LLMRequestOptions(
                 model=os.getenv("OPENAI_MODEL") or os.getenv("LLM_MODEL", "gpt-4o-mini"),
                 messages=[
                     LLMMessage("system", system_prompt),
-                    LLMMessage("user", text),
+                    LLMMessage("user", user_message),
                 ],
                 temperature=0.0,
-                max_tokens=120,  # Reduced for faster parsing
+                max_tokens=200,  # Increased to handle context
                 use_local=False,  # Skip Ollama when using OpenAI
             )
         )
@@ -312,24 +442,35 @@ Return ONLY the JSON object, nothing else."""
             # Enhanced fallback parser (same as below)
             event_data = _fallback_parse_event(text)
         
-        # Validate required fields
-        if not event_data or not event_data.get("title") or not event_data.get("start_time"):
-            missing = []
-            if not event_data or not event_data.get("title"):
-                missing.append("title")
-            if not event_data or not event_data.get("start_time"):
-                missing.append("start_time")
-            
-            return {
-                "missing_fields": missing,
-                "clarifying_question": f"What {' and '.join(missing)} would you like for this event?",
-            }
+        # Use smart defaults instead of asking for clarification
+        if not event_data:
+            event_data = {}
         
-        # Set default end_time if missing
+        # Default title
+        if not event_data.get("title"):
+            event_data["title"] = "Meeting"
+        
+        # Default start_time (today at 2pm)
+        if not event_data.get("start_time"):
+            default_start = now.replace(hour=14, minute=0, second=0, microsecond=0)
+            event_data["start_time"] = default_start.isoformat()
+        
+        # Default end_time (1 hour after start)
         if not event_data.get("end_time"):
             start = datetime.fromisoformat(event_data["start_time"].replace("Z", "+00:00"))
             end = start + timedelta(hours=1)
             event_data["end_time"] = end.isoformat()
+        
+        # Default attendees (empty array)
+        if "attendees" not in event_data:
+            event_data["attendees"] = []
+        
+        # Ensure attendees is a list
+        if isinstance(event_data.get("attendees"), str):
+            try:
+                event_data["attendees"] = json.loads(event_data["attendees"])
+            except:
+                event_data["attendees"] = []
         
         return {"event": event_data}
     
@@ -413,7 +554,16 @@ def _fallback_parse_event(text: str) -> Dict[str, Any]:
 
 @router.post("/parse")
 async def parse_event(request: ParseEventRequest):
-    """Parse natural language to create calendar event."""
+    """
+    Parse natural language to create calendar event - DEPRECATED.
+    
+    This endpoint is deprecated. Use POST /api/v1/scheduler/parse instead.
+    """
+    warnings.warn(
+        "POST /api/calendar/parse is deprecated. Use POST /api/v1/scheduler/parse instead.",
+        DeprecationWarning,
+        stacklevel=2
+    )
     try:
         text = request.text
         if not text:

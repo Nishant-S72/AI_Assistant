@@ -4,7 +4,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import List, Dict, Optional
 import json
-from app.clients.llm.streaming import stream_chat
+from app.clients.llm.adapter import stream_chat
 
 router = APIRouter()
 

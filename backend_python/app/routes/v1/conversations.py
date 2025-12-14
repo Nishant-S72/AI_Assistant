@@ -3,6 +3,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from typing import Optional
 from app.services.conversation_store import get_conversation_store
+from app.conversation.summarizer import summarize_messages
 
 router = APIRouter()
 

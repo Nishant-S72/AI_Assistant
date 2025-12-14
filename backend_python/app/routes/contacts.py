@@ -3,6 +3,9 @@ from fastapi import APIRouter, HTTPException, Query
 from typing import Optional, List, Dict, Any
 from app.db.connection import get_pool
 from app.clients.llm import generate_chat_completion, LLMMessage, LLMRequestOptions
+from app.services.cache_manager import (
+    get_contact_summary_cache, set_contact_summary_cache
+)
 import json
 import os
 import uuid
@@ -172,6 +175,12 @@ async def get_contact_messages(
 async def get_contact_summary(contact_id: str):
     """Get LLM-generated interaction summary."""
     try:
+        # Check cache first
+        cached = get_contact_summary_cache(contact_id)
+        if cached:
+            print(f"[ContactSummary] Using cached summary for {contact_id}")
+            return cached
+        
         pool = await get_pool()
         async with pool.acquire() as conn:
             # Get contact info
@@ -440,13 +449,18 @@ Provide 2-3 actionable recommendations. Be specific and practical. Keep each rec
                         "last_message_at": thread_messages[-1]["created_at"].isoformat() if thread_messages else None,
                     })
 
-            return {
+            response_data = {
                 "summary": summary_text,
                 "recommendations": recommendations,
                 "recentConversations": recent_conversations,
                 "messageCount": message_count,
                 "taskStats": task_stats,
             }
+            
+            # Cache the response
+            set_contact_summary_cache(contact_id, response_data)
+            
+            return response_data
     except HTTPException:
         raise
     except Exception as error:

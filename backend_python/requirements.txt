@@ -26,6 +26,7 @@ uuid==1.30
 # Background jobs
 celery==5.3.4
 redis==5.0.1
+apscheduler==3.10.4
 
 # PDF parsing
 PyPDF2==3.0.1

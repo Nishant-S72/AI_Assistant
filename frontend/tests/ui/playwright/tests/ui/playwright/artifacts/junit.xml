@@ -1,0 +1,23 @@
+<testsuites id="" name="" tests="5" failures="0" skipped="0" errors="0" time="5.360099999999999">
+<testsuite name="test_scheduler_flow.spec.ts" timestamp="2025-12-07T01:08:06.921Z" hostname="chromium" tests="5" failures="0" skipped="0" time="4.358" errors="0">
+<testcase name="Scheduler Flow › should parse natural language and show preview" classname="test_scheduler_flow.spec.ts" time="1.916">
+<system-out>
+<![CDATA[
+[[ATTACHMENT|../../../../test_scheduler_flow.spec.ts-snapshots/scheduler-parse-preview-chromium-darwin.png]]
+
+[[ATTACHMENT|test-results/test_scheduler_flow-Schedu-a45dd-l-language-and-show-preview-chromium/scheduler-parse-preview-actual.png]]
+
+[[ATTACHMENT|test-results/test_scheduler_flow-Schedu-a45dd-l-language-and-show-preview-chromium/scheduler-parse-preview-diff.png]]
+]]>
+</system-out>
+</testcase>
+<testcase name="Scheduler Flow › should create event and show confirmation" classname="test_scheduler_flow.spec.ts" time="0.608">
+</testcase>
+<testcase name="Scheduler Flow › should show conflict alternatives when freebusy indicates conflict" classname="test_scheduler_flow.spec.ts" time="0.574">
+</testcase>
+<testcase name="Scheduler Flow › should create recurring event" classname="test_scheduler_flow.spec.ts" time="0.637">
+</testcase>
+<testcase name="Scheduler Flow › should schedule reminder when creating event" classname="test_scheduler_flow.spec.ts" time="0.623">
+</testcase>
+</testsuite>
+</testsuites>

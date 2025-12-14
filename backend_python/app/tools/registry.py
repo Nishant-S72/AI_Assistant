@@ -1,5 +1,5 @@
 """Function registry for LLM tool calling."""
-from typing import Dict, Callable, Any, List
+from typing import Dict, Callable, Any, List, Optional
 import json
 
 
@@ -10,11 +10,10 @@ class ToolRegistry:
         self._tools: Dict[str, Dict[str, Any]] = {}
         self._handlers: Dict[str, Callable] = {}
     
-    def register(
+    def register_tool(
         self,
         name: str,
-        description: str,
-        parameters: Dict[str, Any],
+        schema: Dict[str, Any],
         handler: Callable,
     ):
         """
@@ -22,10 +21,12 @@ class ToolRegistry:
         
         Args:
             name: Function name
-            description: Function description
-            parameters: JSON Schema for parameters
+            schema: JSON Schema for function (must include 'description' and 'parameters')
             handler: Async function handler
         """
+        description = schema.get("description", "")
+        parameters = schema.get("parameters", {})
+        
         self._tools[name] = {
             "type": "function",
             "function": {
@@ -36,8 +37,12 @@ class ToolRegistry:
         }
         self._handlers[name] = handler
     
-    def get_tools(self) -> List[Dict[str, Any]]:
-        """Get list of tool definitions for LLM."""
+    def get_tool(self, name: str) -> Optional[Dict[str, Any]]:
+        """Get tool definition by name."""
+        return self._tools.get(name)
+    
+    def list_schemas(self) -> List[Dict[str, Any]]:
+        """List all tool schemas."""
         return list(self._tools.values())
     
     async def call(self, name: str, arguments: Dict[str, Any]) -> Any:
@@ -57,57 +62,40 @@ def get_registry() -> ToolRegistry:
     return _registry
 
 
-# Register sample tools
-async def send_email_stub(to: str, subject: str, body: str) -> Dict[str, Any]:
-    """Send email (stub implementation)."""
-    # TODO: Implement actual email sending
-    return {
-        "success": True,
-        "message_id": f"stub-{to}-{subject[:10]}",
-        "to": to,
-        "subject": subject,
-    }
-
-
-async def get_calendar_events(range_start: str, range_end: str) -> List[Dict[str, Any]]:
-    """Get calendar events in date range."""
-    # TODO: Implement actual calendar fetch
-    return [
-        {
-            "id": "stub-1",
-            "title": "Sample Event",
-            "start": range_start,
-            "end": range_end,
-        }
-    ]
+# Import sample handlers
+from .sample_handlers import send_email_stub, get_calendar_events
 
 
 # Initialize registry with sample tools
-_registry.register(
+_registry.register_tool(
     name="send_email",
-    description="Send an email to a recipient",
-    parameters={
-        "type": "object",
-        "properties": {
-            "to": {"type": "string", "description": "Recipient email address"},
-            "subject": {"type": "string", "description": "Email subject"},
-            "body": {"type": "string", "description": "Email body"},
+    schema={
+        "description": "Send an email to a recipient",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "to": {"type": "string", "description": "Recipient email address"},
+                "subject": {"type": "string", "description": "Email subject"},
+                "body": {"type": "string", "description": "Email body"},
+            },
+            "required": ["to", "subject", "body"],
         },
-        "required": ["to", "subject", "body"],
     },
     handler=send_email_stub,
 )
 
-_registry.register(
+_registry.register_tool(
     name="get_calendar_events",
-    description="Get calendar events in a date range",
-    parameters={
-        "type": "object",
-        "properties": {
-            "range_start": {"type": "string", "description": "Start date (ISO format)"},
-            "range_end": {"type": "string", "description": "End date (ISO format)"},
+    schema={
+        "description": "Get calendar events in a date range",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "range_start": {"type": "string", "description": "Start date (ISO format)"},
+                "range_end": {"type": "string", "description": "End date (ISO format)"},
+            },
+            "required": ["range_start", "range_end"],
         },
-        "required": ["range_start", "range_end"],
     },
     handler=get_calendar_events,
 )

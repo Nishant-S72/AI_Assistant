@@ -5,22 +5,19 @@ from datetime import datetime
 from app.db.connection import get_pool
 from app.clients.llm import generate_chat_completion, LLMMessage, LLMRequestOptions
 from app.lib.priority import compute_priority
+from app.services.cache_manager import (
+    get_summary_cache, set_summary_cache,
+    get_category_summary_cache, set_category_summary_cache
+)
 import json
 import os
 import asyncio
 
 router = APIRouter()
 
-# Simple in-memory cache
-_summary_cache = None
-_summary_cache_timestamp = None
-_summary_cache_data = {}  # Cache for full summary data
-
 
 async def _generate_summary_async(totals: Dict, tasks_by_priority: Dict, counts: Dict, top_leads: List, urgent_context: Dict):
-    """Generate AI summary in the background."""
-    global _summary_cache, _summary_cache_timestamp
-    
+    """Generate AI summary in the background and update cache."""
     try:
         top_p0_tasks = ", ".join(
             [f"{t.get('contact_name', 'Contact')}: {t.get('title', '')}" for t in tasks_by_priority["P0"][:3]]
@@ -67,9 +64,19 @@ Give me a concise summary of what's happening. Be specific about who needs atten
 
         summary_paragraph = llm_response.content.strip()
         
-        # Cache for 1 minute
-        _summary_cache = summary_paragraph
-        _summary_cache_timestamp = datetime.now().timestamp() * 1000
+        # Update cache with the generated summary
+        # Get the current cached data and update it with the new summary
+        cached_data = get_summary_cache()
+        if cached_data:
+            cached_data["summaryParagraph"] = summary_paragraph
+            cached_data["summaryGenerating"] = False
+            set_summary_cache(cached_data)
+        else:
+            # If no cache exists, create a minimal cache entry
+            set_summary_cache({
+                "summaryParagraph": summary_paragraph,
+                "summaryGenerating": False,
+            })
         
         print(f"[Summary] AI summary generated and cached")
     except Exception as error:
@@ -92,19 +99,48 @@ async def get_summary(background_tasks: BackgroundTasks):
         except Exception:
             pass
 
-        totals = {
-            "totalMessages": 0,
-            "unread": 0,
-            "leads": 0,
-            "complaints": 0,
-            "urgent": 0,
-            "highPriority": 0,
-        }
+        # Check cache for badges/metrics first
+        from app.services.cache_manager import get_badges_cache
+        cached_badges = get_badges_cache()
+        
+        if cached_badges:
+            # Use cached badges/metrics
+            totals = cached_badges.get("totals", {
+                "totalMessages": 0,
+                "unread": 0,
+                "leads": 0,
+                "complaints": 0,
+                "urgent": 0,
+                "highPriority": 0,
+            })
+            counts = cached_badges.get("tasks", {}).get("counts", {
+                "P0": 0,
+                "P1": 0,
+                "P2": 0,
+            })
+            performance = cached_badges.get("performance", {
+                "avgLatencyMs": None,
+                "suggestionsGenerated": 0,
+                "acceptanceRate": 0,
+                "messagesSent": 0,
+            })
+            print(f"[Summary] Using cached badges/metrics")
+            # Still need to fetch tasks and top_leads for the response
+            tasks: List[Dict] = []
+            top_leads: List[Dict] = []
+        else:
+            totals = {
+                "totalMessages": 0,
+                "unread": 0,
+                "leads": 0,
+                "complaints": 0,
+                "urgent": 0,
+                "highPriority": 0,
+            }
+            tasks: List[Dict] = []
+            top_leads: List[Dict] = []
 
-        tasks: List[Dict] = []
-        top_leads: List[Dict] = []
-
-        if db_available:
+        if db_available and not cached_badges:
             async with pool.acquire() as conn:
                 # Get message totals
                 msg_row = await conn.fetchrow(
@@ -302,56 +338,60 @@ async def get_summary(background_tasks: BackgroundTasks):
             "P2": len([t for t in tasks if t.get("priority") == "P2"]),
         }
 
-        # Get performance metrics
-        performance = {
-            "avgLatencyMs": None,
-            "suggestionsGenerated": 0,
-            "acceptanceRate": 0,
-            "messagesSent": 0,
-        }
+        # Get performance metrics (if not cached)
+        if 'cached_badges' not in locals() or not cached_badges:
+            performance = {
+                "avgLatencyMs": None,
+                "suggestionsGenerated": 0,
+                "acceptanceRate": 0,
+                "messagesSent": 0,
+            }
 
-        if db_available:
-            try:
-                async with pool.acquire() as conn:
-                    # Average latency
-                    latency_row = await conn.fetchrow(
-                        """
-                        SELECT AVG(latency_ms) as avg_latency 
-                        FROM events 
-                        WHERE latency_ms IS NOT NULL 
-                        AND type = 'suggestion_generated'
-                        """
-                    )
-                    performance["avgLatencyMs"] = (
-                        round(float(latency_row["avg_latency"])) if latency_row and latency_row["avg_latency"] else None
-                    )
+            if db_available:
+                try:
+                    async with pool.acquire() as conn:
+                        # Average latency
+                        latency_row = await conn.fetchrow(
+                            """
+                            SELECT AVG(latency_ms) as avg_latency 
+                            FROM events 
+                            WHERE latency_ms IS NOT NULL 
+                            AND type = 'suggestion_generated'
+                            """
+                        )
+                        performance["avgLatencyMs"] = (
+                            round(float(latency_row["avg_latency"])) if latency_row and latency_row["avg_latency"] else None
+                        )
 
-                    # Suggestions generated
-                    sugg_row = await conn.fetchrow("SELECT COUNT(*) as count FROM suggestions")
-                    performance["suggestionsGenerated"] = int(sugg_row["count"]) if sugg_row else 0
+                        # Suggestions generated
+                        sugg_row = await conn.fetchrow("SELECT COUNT(*) as count FROM suggestions")
+                        performance["suggestionsGenerated"] = int(sugg_row["count"]) if sugg_row else 0
 
-                    # Acceptance rate
-                    accepted_row = await conn.fetchrow(
-                        """
-                        SELECT COUNT(*) as count 
-                        FROM suggestions 
-                        WHERE final_text IS NOT NULL 
-                        AND final_text = model_response 
-                        AND edited = false
-                        """
-                    )
-                    accepted = int(accepted_row["count"]) if accepted_row else 0
-                    performance["acceptanceRate"] = (
-                        round((accepted / performance["suggestionsGenerated"]) * 100) / 100
-                        if performance["suggestionsGenerated"] > 0
-                        else 0
-                    )
+                        # Acceptance rate
+                        accepted_row = await conn.fetchrow(
+                            """
+                            SELECT COUNT(*) as count 
+                            FROM suggestions 
+                            WHERE final_text IS NOT NULL 
+                            AND final_text = model_response 
+                            AND edited = false
+                            """
+                        )
+                        accepted = int(accepted_row["count"]) if accepted_row else 0
+                        performance["acceptanceRate"] = (
+                            round((accepted / performance["suggestionsGenerated"]) * 100) / 100
+                            if performance["suggestionsGenerated"] > 0
+                            else 0
+                        )
 
-                    # Messages sent
-                    sent_row = await conn.fetchrow("SELECT COUNT(*) as count FROM events WHERE type = 'message_sent'")
-                    performance["messagesSent"] = int(sent_row["count"]) if sent_row else 0
-            except Exception as error:
-                print(f"Could not fetch performance metrics: {error}")
+                        # Messages sent
+                        sent_row = await conn.fetchrow("SELECT COUNT(*) as count FROM events WHERE type = 'message_sent'")
+                        performance["messagesSent"] = int(sent_row["count"]) if sent_row else 0
+                except Exception as error:
+                    print(f"Could not fetch performance metrics: {error}")
+        else:
+            # Performance already loaded from cache
+            pass
 
         # Get top P0 task for context
         top_p0_task = tasks_by_priority["P0"][0] if tasks_by_priority["P0"] else None
@@ -365,30 +405,18 @@ async def get_summary(background_tasks: BackgroundTasks):
             else None
         )
 
-        # Check cache for AI summary
-        global _summary_cache, _summary_cache_timestamp, _summary_cache_data
+        # Check cache for full summary data
+        cached_summary = get_summary_cache()
         summary_paragraph = None
         summary_generating = False
         
-        if _summary_cache and _summary_cache_timestamp:
-            cache_age = (datetime.now().timestamp() * 1000) - _summary_cache_timestamp
-            if cache_age < 60000:  # 1 minute cache
-                summary_paragraph = _summary_cache
-                summary_generating = False
-            else:
-                # Cache expired, generate new one in background
-                summary_paragraph = None  # Clear old cache
-                summary_generating = True
-                background_tasks.add_task(
-                    _generate_summary_async,
-                    totals,
-                    tasks_by_priority,
-                    counts,
-                    top_leads,
-                    urgent_context
-                )
+        if cached_summary and cached_summary.get("summaryParagraph"):
+            # Use cached summary
+            summary_paragraph = cached_summary.get("summaryParagraph")
+            summary_generating = False
+            print(f"[Summary] Using cached summary")
         else:
-            # No cache, generate in background
+            # No cache or cache invalid, generate in background
             summary_paragraph = None
             summary_generating = True
             background_tasks.add_task(
@@ -406,7 +434,7 @@ async def get_summary(background_tasks: BackgroundTasks):
 
         response_time = (datetime.now().timestamp() * 1000) - start_time
 
-        return {
+        response_data = {
             "totals": totals,
             "tasks": {
                 "counts": counts,
@@ -421,6 +449,14 @@ async def get_summary(background_tasks: BackgroundTasks):
             "summaryParagraph": summary_paragraph,
             "summaryGenerating": summary_generating,
         }
+        
+        # Cache the full response (without the AI summary if it's still generating)
+        # The AI summary will be added to cache when it's generated
+        if summary_paragraph:
+            # Store full response in cache
+            set_summary_cache(response_data)
+        
+        return response_data
     except Exception as error:
         print(f"Error generating summary: {error}")
         raise HTTPException(status_code=500, detail=f"Failed to generate summary: {str(error)}")
@@ -430,6 +466,12 @@ async def get_summary(background_tasks: BackgroundTasks):
 async def get_category_summary(type: str = "urgent"):
     """Generate a category-specific summary (urgent, high, unread, complaints, leads)."""
     try:
+        # Check cache first
+        cached = get_category_summary_cache(type)
+        if cached:
+            print(f"[Summary] Using cached category summary for {type}")
+            return cached
+        
         pool = await get_pool()
         
         # Map category types to database queries
@@ -579,10 +621,15 @@ Provide a concise summary (under 150 words) of what needs attention in this cate
             )
         )
         
-        return {
+        response_data = {
             "summary": llm_response.content.strip(),
             "category": type,
         }
+        
+        # Cache the response
+        set_category_summary_cache(type, response_data)
+        
+        return response_data
     except Exception as error:
         print(f"Error generating category summary: {error}")
         raise HTTPException(status_code=500, detail=f"Failed to generate category summary: {str(error)}")

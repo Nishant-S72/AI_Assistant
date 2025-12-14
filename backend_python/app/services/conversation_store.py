@@ -1,6 +1,6 @@
 """Conversation memory and summarization service."""
 from typing import List, Dict, Any, Optional
-from app.clients.llm import generate_chat_completion, LLMMessage, LLMRequestOptions
+from app.conversation.summarizer import summarize_messages
 import os
 
 
@@ -56,30 +56,8 @@ class ConversationStore:
     
     async def _summarize_messages(self, messages: List[Dict[str, str]]) -> str:
         """Summarize a list of messages using LLM."""
-        messages_text = "\n".join([
-            f"{msg['role']}: {msg['content']}"
-            for msg in messages
-        ])
-        
-        prompt = f"""Summarize the following conversation in 2-3 sentences, focusing on key points and decisions:
-
-{messages_text}
-
-Summary:"""
-        
         try:
-            response = await generate_chat_completion(
-                LLMRequestOptions(
-                    model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
-                    messages=[
-                        LLMMessage("system", "You are a helpful assistant that summarizes conversations concisely."),
-                        LLMMessage("user", prompt),
-                    ],
-                    max_tokens=150,
-                    temperature=0.3,
-                )
-            )
-            return response.content.strip()
+            return await summarize_messages(messages)
         except Exception as e:
             print(f"Summarization error: {e}")
             return "Previous conversation context (summary unavailable)"

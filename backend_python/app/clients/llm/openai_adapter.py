@@ -37,10 +37,12 @@ class LLMResponse:
         content: str,
         model: str,
         usage: Optional[dict] = None,
+        function_call: Optional[dict] = None,
     ):
         self.content = content
         self.model = model
         self.usage = usage or {}
+        self.function_call = function_call
 
 
 async def generate_with_openai(options: LLMOptions) -> LLMResponse:
@@ -62,15 +64,39 @@ async def generate_with_openai(options: LLMOptions) -> LLMResponse:
     if options.max_tokens is not None:
         request_params["max_tokens"] = options.max_tokens
     
+    # Add tools if provided (for function calling)
+    if hasattr(options, 'tools') and options.tools:
+        request_params["tools"] = options.tools
+    if hasattr(options, 'tool_choice') and options.tool_choice:
+        request_params["tool_choice"] = options.tool_choice
+    
     response = await client.chat.completions.create(**request_params)
+    
+    message = response.choices[0].message
+    function_call = None
+    
+    # Extract function call if present
+    if message.tool_calls:
+        tool_call = message.tool_calls[0]
+        function_call = {
+            "name": tool_call.function.name,
+            "arguments": tool_call.function.arguments,
+        }
+    elif hasattr(message, 'function_call') and message.function_call:
+        # Legacy function calling format
+        function_call = {
+            "name": message.function_call.name,
+            "arguments": message.function_call.arguments,
+        }
 
     return LLMResponse(
-        content=response.choices[0].message.content or "",
+        content=message.content or "",
         model=response.model,
         usage={
             "prompt_tokens": response.usage.prompt_tokens if response.usage else None,
             "completion_tokens": response.usage.completion_tokens if response.usage else None,
             "total_tokens": response.usage.total_tokens if response.usage else None,
         },
+        function_call=function_call,
     )
 
