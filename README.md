@@ -1,3 +1,7 @@
+# AI Chief-of-Staff
+
+> **📚 For a complete feature-by-feature breakdown, see [FEATURES.md](./FEATURES.md)**
+
 # AI Chief-of-Staff POC
 
 A production-ready proof-of-concept for an AI-powered communication assistant that helps manage inboxes, generate contextual replies, and handle customer communications with policy-based safety checks.
