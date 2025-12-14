@@ -1,7 +1,7 @@
 """
 Chat API - refactored to use new architecture.
 """
-from fastapi import APIRouter, HTTPException, Header, Depends
+from fastapi import APIRouter, HTTPException, Header, Depends, Request
 from typing import Optional, List, Dict, Any, Literal
 from pydantic import BaseModel
 from app.agent.intent_router import route_intent
@@ -51,6 +51,7 @@ async def get_current_user(x_user_id: Optional[str] = Header(None, alias="X-User
 @router.post("", response_model=ChatResponse)
 async def chat(
     request: ChatRequest,
+    http_request: Request,
     user_id: str = Depends(get_current_user),
 ):
     """
@@ -63,7 +64,8 @@ async def chat(
     4. If Pro tier and action planned: execute action
     5. Return response with tier-appropriate content
     """
-    correlation_id = str(uuid.uuid4())
+    # Get correlation ID from request state (set by middleware)
+    correlation_id = getattr(http_request.state, "correlation_id", None) or str(uuid.uuid4())
     suggestion_id = str(uuid.uuid4())
     
     try:
@@ -215,6 +217,7 @@ async def chat(
 @router.post("/execute")
 async def execute_planned_action(
     action_plan: Dict[str, Any],
+    http_request: Request,
     user_id: str = Depends(get_current_user),
 ):
     """
@@ -222,7 +225,8 @@ async def execute_planned_action(
     
     Used when Assist tier user approves a suggested action.
     """
-    correlation_id = str(uuid.uuid4())
+    # Get correlation ID from request state (set by middleware)
+    correlation_id = getattr(http_request.state, "correlation_id", None) or str(uuid.uuid4())
     
     try:
         tier = await get_user_tier(user_id)

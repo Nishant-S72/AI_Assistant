@@ -57,11 +57,13 @@ def build_prompt(
     
     # Replace section placeholders
     for key, value in sections.items():
-        template = template.replace(f"{{{{{key}}}}}}", value)
+        # Use double braces to escape in f-string, then replace
+        placeholder = "{{" + key + "}}"
+        template = template.replace(placeholder, value)
     
     # Replace variable placeholders
     for key, value in variables.items():
-        placeholder = f"{{{{{key}}}}}}"
+        placeholder = "{{" + key + "}}"
         if placeholder in template:
             # Format value appropriately
             if isinstance(value, list):

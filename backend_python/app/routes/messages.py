@@ -5,7 +5,6 @@ from app.db.connection import get_pool
 from app.clients.llm import generate_chat_completion, LLMMessage, LLMRequestOptions
 from app.clients.vectorstore import query_vectorstore
 from app.policy.policy_engine import check_policy
-from app.utils.deduplication import normalize_thread_id
 from app.core.logger import logger
 import uuid
 import os
@@ -171,6 +170,10 @@ async def get_thread(message_id: str):
             
             # Get thread messages
             thread_id = message_data.get("thread_id")
+            
+            # Note: Thread normalization removed from here as it was causing issues
+            # Thread IDs should be normalized at creation time, not at read time
+            
             if not thread_id:
                 raise HTTPException(status_code=404, detail="Thread not found")
             

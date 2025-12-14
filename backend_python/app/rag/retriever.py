@@ -1,5 +1,5 @@
 """
-RAG retriever - retrieves top K chunks with citations.
+RAG retriever - retrieves top K chunks with citations and precision guarantees.
 """
 from typing import List, Dict, Any, Optional
 from app.core.config import RAG_TOP_K
@@ -8,6 +8,12 @@ from app.core.logger import logger
 from app.clients.vectorstore.json_adapter import query_json_store
 from app.clients.vectorstore import VectorQueryResult
 from typing import List as TypingList
+
+# Minimum similarity threshold to avoid irrelevant chunks
+RAG_MIN_SIMILARITY_THRESHOLD = 0.3
+# Consistent chunk size range (tokens)
+RAG_CHUNK_SIZE_MIN = 300
+RAG_CHUNK_SIZE_MAX = 500
 
 
 async def retrieve_chunks(
@@ -49,11 +55,29 @@ async def retrieve_chunks(
             text = result.text
             score = result.score
             
+            # Apply minimum similarity threshold
+            if score < RAG_MIN_SIMILARITY_THRESHOLD:
+                logger.info(
+                    "RAG chunk filtered by similarity threshold",
+                    extra={
+                        "score": score,
+                        "threshold": RAG_MIN_SIMILARITY_THRESHOLD,
+                        "correlation_id": correlation_id,
+                    }
+                )
+                continue
+            
+            # Extract enhanced provenance metadata
+            line_numbers = metadata.get("line_numbers", [])
+            document_title = metadata.get("document_title") or metadata.get("filename", "unknown")
+            
             chunks.append({
                 "content": text,
                 "source": metadata.get("source", "unknown"),
                 "filename": metadata.get("filename", "unknown"),
+                "document_title": document_title,
                 "fragment_index": metadata.get("fragment_index", idx - 1),
+                "line_numbers": line_numbers,
                 "score": score,
                 "snippet": text[:200] + "..." if len(text) > 200 else text,
                 "citation_token": f"[ref{idx}]",
@@ -93,7 +117,7 @@ async def format_rag_response(
         Formatted response with citation tokens
     """
     if not chunks:
-        return "I don't have information about that in the available documents."
+        return "No relevant information found in the available documents."
     
     # Build context from chunks
     context_parts = []

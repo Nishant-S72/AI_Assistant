@@ -177,12 +177,16 @@ JSON:"""
             if not isinstance(task, dict):
                 continue
             
-            # Check confidence threshold
+                # Check confidence threshold
             confidence = task.get("confidence", 0.5)
             if confidence < MIN_CONFIDENCE_THRESHOLD:
                 logger.info(
-                    f"Skipping low-confidence task: {task.get('title', 'Unknown')} (confidence: {confidence})",
-                    extra={"confidence": confidence, "extraction_reason": task.get("extraction_reason", "")}
+                    "Skipping low-confidence task",
+                    extra={
+                        "title": task.get('title', 'Unknown'),
+                        "confidence": confidence,
+                        "extraction_reason": task.get("extraction_reason", "")
+                    }
                 )
                 continue
             

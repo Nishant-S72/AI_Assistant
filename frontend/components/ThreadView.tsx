@@ -11,6 +11,8 @@ import { api, ThreadData, ThreadMessage } from '@/lib/api';
 import SuggestionPanel from './SuggestionPanel';
 import { formatDate, formatTime, cn } from '@/lib/utils';
 import { useAppStore } from '@/lib/store';
+import { SkeletonLoader } from './SkeletonLoader';
+import { ErrorState } from './ErrorState';
 
 interface ThreadViewProps {
   messageId: string;
@@ -43,23 +45,29 @@ export default function ThreadView({ messageId }: ThreadViewProps) {
 
   if (loading) {
     return (
-      <div className="flex items-center justify-center h-full">
-        <div className="text-gray-500 dark:text-gray-400">Loading thread...</div>
+      <div className="flex flex-col h-full">
+        <div className="p-6 border-b border-[var(--glass-border)] bg-white/50 backdrop-blur-sm">
+          <SkeletonLoader variant="text" lines={2} width="200px" />
+        </div>
+        <div className="flex-1 overflow-y-auto custom-scrollbar p-6">
+          <div className="max-w-3xl mx-auto">
+            <SkeletonLoader variant="message" count={3} />
+          </div>
+        </div>
+        <div className="p-4 border-t border-[var(--glass-border)] bg-white/50 backdrop-blur-sm">
+          <SkeletonLoader variant="text" lines={2} />
+        </div>
       </div>
     );
   }
 
   if (error || !threadData) {
     return (
-      <div className="flex flex-col items-center justify-center h-full gap-4">
-        <div className="text-red-600 dark:text-red-400">{error || 'Thread not found'}</div>
-        <button
-          onClick={loadThread}
-          className="px-4 py-2 bg-primary-500 text-white rounded-lg hover:bg-primary-600"
-        >
-          Retry
-        </button>
-      </div>
+      <ErrorState
+        message={error || 'Thread not found'}
+        onRetry={loadThread}
+        className="h-full"
+      />
     );
   }
 
@@ -68,15 +76,11 @@ export default function ThreadView({ messageId }: ThreadViewProps) {
   // Handle case where contact might be undefined
   if (!contact) {
     return (
-      <div className="flex flex-col items-center justify-center h-full gap-4">
-        <div className="text-red-600 dark:text-red-400">Contact information not available</div>
-        <button
-          onClick={loadThread}
-          className="px-4 py-2 bg-primary-500 text-white rounded-lg hover:bg-primary-600"
-        >
-          Retry
-        </button>
-      </div>
+      <ErrorState
+        message="Contact information not available"
+        onRetry={loadThread}
+        className="h-full"
+      />
     );
   }
 

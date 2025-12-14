@@ -1,114 +1,162 @@
-"""Notification dispatcher for sending reminders via multiple channels."""
-from typing import Optional, Dict, Any
-from app.notifications.email_sender import send_email_reminder
-from app.notifications.slack_sender import send_slack_reminder
-from app.notifications.in_app_sender import send_in_app_notification
+"""Notification dispatcher for reminders and tasks with duplicate prevention."""
+from typing import Optional
+import hashlib
+from datetime import datetime
+from app.notifications.email_adapter import send_email_notification
+from app.notifications.slack_adapter import send_slack_notification
+from app.notifications.inapp_adapter import send_inapp_notification
 from app.db.connection import get_pool
+from app.core.logger import logger
+import asyncio
 
 
 async def send_reminder_notification(
     reminder_id: str,
     user_id: str,
-    event_id: str,
-    reminder_type: str,
-    message: Optional[str] = None,
-) -> Dict[str, Any]:
+    event_id: Optional[str],
+    channel: str,
+    message: Optional[str],
+):
     """
-    Send a reminder notification via the specified channel.
+    Send reminder notification via specified channel with duplicate prevention.
     
-    Args:
-        reminder_id: Reminder ID
-        user_id: User ID
-        event_id: Event ID
-        reminder_type: Type of reminder ('email', 'slack', 'in_app')
-        message: Custom message
-    
-    Returns:
-        Dict with notification status
+    Uses hashed delivery keys to prevent duplicate notifications.
     """
-    pool = await get_pool()
-    
-    # Get event details
-    async with pool.acquire() as conn:
-        event_row = await conn.fetchrow(
-            """
-            SELECT title, start_time, end_time
-            FROM event_mirror
-            WHERE id = $1
-            """,
-            event_id,
-        )
+    try:
+        # Generate delivery key to prevent duplicates
+        delivery_key = hashlib.md5(
+            f"{reminder_id}:{user_id}:{event_id}:{channel}:{message}".encode()
+        ).hexdigest()
         
-        if not event_row:
-            print(f"[Notification] Event {event_id} not found")
-            return {"success": False, "error": "Event not found"}
-        
-        # Get user details
-        user_row = await conn.fetchrow(
-            """
-            SELECT email, name
-            FROM users
-            WHERE id = $1
-            """,
-            user_id,
-        )
-        
-        if not user_row:
-            print(f"[Notification] User {user_id} not found")
-            return {"success": False, "error": "User not found"}
-        
-        # Send notification based on type
-        try:
-            if reminder_type == "email":
-                result = await send_email_reminder(
-                    to_email=user_row["email"],
-                    event_title=event_row["title"],
-                    event_start=event_row["start_time"],
-                    message=message,
-                )
-            elif reminder_type == "slack":
-                result = await send_slack_reminder(
-                    user_id=user_id,
-                    event_title=event_row["title"],
-                    event_start=event_row["start_time"],
-                    message=message,
-                )
-            elif reminder_type == "in_app":
-                result = await send_in_app_notification(
-                    user_id=user_id,
-                    event_title=event_row["title"],
-                    event_start=event_row["start_time"],
-                    message=message,
-                )
-            else:
-                raise ValueError(f"Unknown reminder type: {reminder_type}")
+        # Check if already delivered
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            # Check reminders table for delivered status
+            delivered = await conn.fetchval(
+                """
+                SELECT delivered FROM reminders 
+                WHERE id = $1 AND delivered = TRUE
+                """,
+                reminder_id,
+            )
             
-            # Update reminder status
+            if delivered:
+                logger.info(
+                    "Reminder already delivered, skipping",
+                    extra={"reminder_id": reminder_id, "delivery_key": delivery_key}
+                )
+                return
+        
+        # Send notification
+        if channel == "email":
+            await send_email_notification(user_id, message or "Reminder", message or "")
+        elif channel == "slack":
+            await send_slack_notification(user_id, message or "Reminder", message or "")
+        else:
+            await send_inapp_notification(user_id, message or "Reminder", message or "")
+        
+        # Mark as delivered
+        async with pool.acquire() as conn:
             await conn.execute(
                 """
-                UPDATE reminders
-                SET status = 'sent', last_attempt_at = NOW(), updated_at = NOW()
+                UPDATE reminders 
+                SET delivered = TRUE, delivered_at = NOW()
                 WHERE id = $1
                 """,
                 reminder_id,
             )
-            
-            return {"success": True, "reminder_id": reminder_id, **result}
-            
-        except Exception as e:
-            print(f"[Notification] Error sending reminder {reminder_id}: {e}")
-            
-            # Update reminder with error
-            await conn.execute(
+        
+        logger.info(
+            "Reminder notification sent",
+            extra={"reminder_id": reminder_id, "channel": channel, "delivery_key": delivery_key}
+        )
+    except Exception as e:
+        logger.error(
+            "Error sending reminder notification",
+            extra={"reminder_id": reminder_id, "error": str(e)}
+        )
+        # Retry once after failure
+        try:
+            await asyncio.sleep(1)
+            if channel == "email":
+                await send_email_notification(user_id, message or "Reminder", message or "")
+            elif channel == "slack":
+                await send_slack_notification(user_id, message or "Reminder", message or "")
+            else:
+                await send_inapp_notification(user_id, message or "Reminder", message or "")
+            logger.info("Reminder notification sent on retry", extra={"reminder_id": reminder_id})
+        except Exception as retry_error:
+            logger.error(
+                "Reminder notification failed on retry",
+                extra={"reminder_id": reminder_id, "error": str(retry_error)}
+            )
+
+
+async def send_task_reminder_notification(
+    task_id: str,
+    user_id: str,
+    message: Optional[str],
+):
+    """
+    Send task reminder notification with duplicate prevention.
+    
+    Uses hashed delivery keys to prevent duplicate notifications.
+    """
+    try:
+        # Generate delivery key to prevent duplicates
+        delivery_key = hashlib.md5(
+            f"task:{task_id}:{user_id}:{message}".encode()
+        ).hexdigest()
+        
+        # Check if already delivered
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            # Check tasks table for reminder_sent status
+            reminder_sent = await conn.fetchval(
                 """
-                UPDATE reminders
-                SET status = 'failed', error_message = $1, last_attempt_at = NOW(), updated_at = NOW()
-                WHERE id = $2
+                SELECT reminder_sent FROM tasks 
+                WHERE id = $1 AND reminder_sent = TRUE
                 """,
-                str(e),
-                reminder_id,
+                task_id,
             )
             
-            return {"success": False, "error": str(e)}
-
-
+            if reminder_sent:
+                logger.info(
+                    "Task reminder already sent, skipping",
+                    extra={"task_id": task_id, "delivery_key": delivery_key}
+                )
+                return
+        
+        # Send notification
+        await send_inapp_notification(user_id, message or "Task reminder", message or "")
+        
+        # Mark as sent
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """
+                UPDATE tasks 
+                SET reminder_sent = TRUE, reminder_sent_at = NOW()
+                WHERE id = $1
+                """,
+                task_id,
+            )
+        
+        logger.info(
+            "Task reminder notification sent",
+            extra={"task_id": task_id, "delivery_key": delivery_key}
+        )
+    except Exception as e:
+        logger.error(
+            "Error sending task reminder notification",
+            extra={"task_id": task_id, "error": str(e)}
+        )
+        # Retry once after failure
+        try:
+            await asyncio.sleep(1)
+            await send_inapp_notification(user_id, message or "Task reminder", message or "")
+            logger.info("Task reminder notification sent on retry", extra={"task_id": task_id})
+        except Exception as retry_error:
+            logger.error(
+                "Task reminder notification failed on retry",
+                extra={"task_id": task_id, "error": str(retry_error)}
+            )

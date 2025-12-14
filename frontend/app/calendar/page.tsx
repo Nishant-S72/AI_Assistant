@@ -9,6 +9,9 @@ import { api, CalendarEvent } from '@/lib/api';
 import GlassCard from '@/components/GlassCard';
 import EventModal from '@/components/EventModal';
 import { motion } from 'framer-motion';
+import { SkeletonLoader } from '@/components/SkeletonLoader';
+import { EmptyState } from '@/components/EmptyState';
+import { ErrorState } from '@/components/ErrorState';
 
 export default function CalendarPage() {
   const [events, setEvents] = useState<CalendarEvent[]>([]);
@@ -22,6 +25,7 @@ export default function CalendarPage() {
   const [initialEndTime, setInitialEndTime] = useState<Date | undefined>();
   const [showGoogleEvents, setShowGoogleEvents] = useState(true);
   const [isGoogleConnected, setIsGoogleConnected] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   // Get start and end of month for fetching events
   const monthStart = new Date(currentDate.getFullYear(), currentDate.getMonth(), 1);
@@ -40,6 +44,7 @@ export default function CalendarPage() {
   const loadEvents = async () => {
     try {
       setLoading(true);
+      setError(null);
       const start = monthStart.toISOString();
       const end = monthEnd.toISOString();
       
@@ -51,9 +56,9 @@ export default function CalendarPage() {
       );
       
       setEvents(response.events);
-    } catch (error) {
-      console.error('Error loading calendar events:', error);
-      // Fallback to empty array
+    } catch (err: any) {
+      console.error('Error loading calendar events:', err);
+      setError(err.message || 'Failed to load calendar events');
       setEvents([]);
     } finally {
       setLoading(false);
@@ -219,12 +224,20 @@ export default function CalendarPage() {
               Today's Events
             </h2>
             {loading ? (
-              <div className="flex items-center gap-2 text-theme-muted">
-                <div className="w-4 h-4 border-2 border-[var(--primary)] border-t-transparent rounded-full animate-spin"></div>
-                <span>Loading...</span>
-              </div>
+              <SkeletonLoader variant="event" count={3} />
+            ) : error ? (
+              <ErrorState
+                message={error}
+                onRetry={loadEvents}
+                className="py-4"
+              />
             ) : todayEvents.length === 0 ? (
-              <p className="text-theme-secondary">No events scheduled for today.</p>
+              <EmptyState
+                icon="📅"
+                title="No events today"
+                description="You have no events scheduled for today."
+                className="py-4"
+              />
             ) : (
               <div className="space-y-3">
                 {todayEvents.map((event) => (

@@ -11,6 +11,8 @@ from datetime import datetime, timedelta
 from app.db.connection import get_pool
 from app.connectors.google_adapter import GoogleCalendarAdapter
 from app.scheduler.apscheduler_manager import get_scheduler
+from app.utils.timezone import normalize_to_utc, handle_dst_transition, prevent_duplicate_import
+from app.core.logger import logger
 import json
 import os
 import uuid
@@ -226,9 +228,14 @@ async def create_event(
     If sync_to_google=True and user has Google connected, also creates the event in Google Calendar.
     """
     try:
-        # Validate dates
+        # Parse and normalize to UTC
         start_dt = datetime.fromisoformat(event.start.replace("Z", "+00:00"))
         end_dt = datetime.fromisoformat(event.end.replace("Z", "+00:00"))
+        
+        # Normalize to UTC and handle DST
+        timezone_str = event.timezone or "UTC"
+        start_dt = normalize_to_utc(handle_dst_transition(start_dt, timezone_str), timezone_str)
+        end_dt = normalize_to_utc(handle_dst_transition(end_dt, timezone_str), timezone_str)
         
         if end_dt <= start_dt:
             raise HTTPException(status_code=400, detail="End time must be after start time")
@@ -272,7 +279,7 @@ async def create_event(
                     print(f"[Calendar] Failed to sync to Google: {e}")
                     # Continue with local creation
         
-        # Create local event
+        # Create local event (all times stored in UTC)
         pool = await get_pool()
         async with pool.acquire() as conn:
             row = await conn.fetchrow(
@@ -288,11 +295,11 @@ async def create_event(
                 event.description,
                 event.location,
                 event.video_link,
-                start_dt,
-                end_dt,
+                start_dt,  # UTC
+                end_dt,  # UTC
                 event.all_day,
                 event.color,
-                event.timezone or "UTC",
+                timezone_str,  # Store original timezone for display
                 event.recurrence_rule,
                 json.dumps(attendees_json),
                 source,
@@ -695,8 +702,14 @@ async def import_google_events(
                 # Convert Google event to local format
                 attendees_json = google_event.attendees or []
                 
+                # Normalize end time to UTC
+                google_end_utc = normalize_to_utc(
+                    google_event.end_time,
+                    google_event.timezone or "UTC"
+                )
+                
                 if existing:
-                    # Update existing event
+                    # Update existing event (times in UTC)
                     await conn.execute(
                         """
                         UPDATE events SET
@@ -714,16 +727,16 @@ async def import_google_events(
                         google_event.title,
                         google_event.description,
                         google_event.location,
-                        google_event.start_time,
-                        google_event.end_time,
-                        google_event.timezone or "UTC",
+                        google_start_utc,  # UTC
+                        google_end_utc,  # UTC
+                        google_event.timezone or "UTC",  # Original timezone for display
                         google_event.recurrence_rule,
                         json.dumps(attendees_json),
                         existing["id"],
                     )
                     updated_count += 1
                 else:
-                    # Create new event
+                    # Create new event (times in UTC)
                     await conn.execute(
                         """
                         INSERT INTO events 
@@ -735,9 +748,9 @@ async def import_google_events(
                         google_event.title,
                         google_event.description,
                         google_event.location,
-                        google_event.start_time,
-                        google_event.end_time,
-                        google_event.timezone or "UTC",
+                        google_start_utc,  # UTC
+                        google_end_utc,  # UTC
+                        google_event.timezone or "UTC",  # Original timezone for display
                         google_event.recurrence_rule,
                         json.dumps(attendees_json),
                         google_event.external_id,

@@ -49,7 +49,12 @@ async def schedule_reminder(
     message: Optional[str] = None,
 ) -> str:
     """
-    Schedule a reminder job.
+    Schedule a reminder job with idempotent execution.
+    
+    Ensures:
+    - No duplicate reminders for the same reminder_id
+    - Automatic cleanup of expired jobs
+    - Safety retry on failure (1 attempt)
     
     Args:
         reminder_id: Reminder ID
@@ -66,6 +71,20 @@ async def schedule_reminder(
     
     job_id = f"reminder_{reminder_id}"
     
+    # Cleanup expired jobs first
+    now = datetime.now(trigger_time.tzinfo) if trigger_time.tzinfo else datetime.now()
+    if trigger_time < now:
+        print(f"[Scheduler] Skipping expired reminder {reminder_id} (trigger_time: {trigger_time})")
+        return job_id
+    
+    # Remove existing job if present (idempotent)
+    try:
+        scheduler.remove_job(job_id)
+        print(f"[Scheduler] Removed existing job {job_id} before rescheduling")
+    except Exception:
+        pass  # Job doesn't exist, which is fine
+    
+    # Schedule new job with replace_existing=True for safety
     scheduler.add_job(
         send_reminder_notification,
         "date",
@@ -73,6 +92,7 @@ async def schedule_reminder(
         id=job_id,
         args=[reminder_id, user_id, event_id, reminder_type, message],
         replace_existing=True,
+        max_instances=1,  # Prevent concurrent execution
     )
     
     print(f"[Scheduler] Scheduled reminder {reminder_id} for {trigger_time}")

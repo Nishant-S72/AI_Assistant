@@ -9,6 +9,9 @@ import { useEffect, useState } from 'react';
 import { api, Message } from '@/lib/api';
 import MessageCard from './MessageCard';
 import { useAppStore } from '@/lib/store';
+import { SkeletonLoader } from './SkeletonLoader';
+import { EmptyState } from './EmptyState';
+import { ErrorState } from './ErrorState';
 
 interface InboxListProps {
   folder?: 'all' | 'leads' | 'tasks';
@@ -51,44 +54,60 @@ export default function InboxList({ folder = 'all' }: InboxListProps) {
 
   if (loading) {
     return (
-      <div className="flex items-center justify-center h-64">
-        <div className="text-gray-500 dark:text-gray-400">Loading messages...</div>
+      <div className="flex flex-col h-full">
+        <div className="p-4 border-b border-[var(--glass-border)] bg-white/50 backdrop-blur-sm">
+          <SkeletonLoader variant="text" lines={1} width="200px" />
+        </div>
+        <div className="flex-1 overflow-y-auto custom-scrollbar p-4">
+          <SkeletonLoader variant="message" count={5} />
+        </div>
       </div>
     );
   }
 
   if (error) {
     return (
-      <div className="flex flex-col items-center justify-center h-64 gap-4">
-        <div className="text-red-600 dark:text-red-400">{error}</div>
-        <button
-          onClick={loadMessages}
-          className="px-4 py-2 bg-primary-500 text-white rounded-lg hover:bg-primary-600"
-        >
-          Retry
-        </button>
+      <div className="flex flex-col h-full">
+        <div className="p-4 border-b border-[var(--glass-border)] bg-white/50 backdrop-blur-sm">
+          <h2 className="text-lg font-semibold text-gray-900">Inbox</h2>
+        </div>
+        <div className="flex-1 overflow-y-auto">
+          <ErrorState
+            message={error}
+            onRetry={loadMessages}
+            className="h-full"
+          />
+        </div>
       </div>
     );
   }
 
   if (messages.length === 0) {
     return (
-      <div className="flex flex-col items-center justify-center h-64 gap-4">
-        <div className="text-gray-500 dark:text-gray-400">No messages found</div>
-        <button
-          onClick={async () => {
-            try {
-              await api.seedDemo();
-              await loadMessages();
-              showToast('Demo data loaded', 'success');
-            } catch (err) {
-              showToast('Failed to load demo data', 'error');
-            }
-          }}
-          className="px-4 py-2 bg-primary-500 text-white rounded-lg hover:bg-primary-600"
-        >
-          Load Demo Data
-        </button>
+      <div className="flex flex-col h-full">
+        <div className="p-4 border-b border-[var(--glass-border)] bg-white/50 backdrop-blur-sm">
+          <h2 className="text-lg font-semibold text-gray-900">Inbox</h2>
+        </div>
+        <div className="flex-1 overflow-y-auto">
+          <EmptyState
+            icon="📬"
+            title="No messages found"
+            description="Your inbox is empty. Load demo data to get started."
+            action={{
+              label: 'Load Demo Data',
+              onClick: async () => {
+                try {
+                  await api.seedDemo();
+                  await loadMessages();
+                  showToast('Demo data loaded', 'success');
+                } catch (err) {
+                  showToast('Failed to load demo data', 'error');
+                }
+              },
+            }}
+            className="h-full"
+          />
+        </div>
       </div>
     );
   }

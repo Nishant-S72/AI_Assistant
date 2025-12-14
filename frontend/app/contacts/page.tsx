@@ -11,6 +11,9 @@ import Link from 'next/link';
 import { api, Contact } from '@/lib/api';
 import GlassCard from '@/components/GlassCard';
 import { motion } from 'framer-motion';
+import { SkeletonLoader } from '@/components/SkeletonLoader';
+import { EmptyState } from '@/components/EmptyState';
+import { ErrorState } from '@/components/ErrorState';
 
 export default function ContactsPage() {
   const router = useRouter();
@@ -19,6 +22,7 @@ export default function ContactsPage() {
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedTag, setSelectedTag] = useState<string | null>(null);
   const [availableTags, setAvailableTags] = useState<string[]>([]);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     loadContacts();
@@ -36,6 +40,7 @@ export default function ContactsPage() {
   const loadContacts = async (search = '', tag?: string) => {
     try {
       setLoading(true);
+      setError(null);
       const data = await api.getContacts(search, tag);
       setContacts(data);
       
@@ -63,8 +68,9 @@ export default function ContactsPage() {
         const indexB = allowedTags.indexOf(b);
         return (indexA === -1 ? 999 : indexA) - (indexB === -1 ? 999 : indexB);
       }));
-    } catch (error) {
-      console.error('Error loading contacts:', error);
+    } catch (err: any) {
+      console.error('Error loading contacts:', err);
+      setError(err.message || 'Failed to load contacts');
     } finally {
       setLoading(false);
     }
@@ -178,24 +184,24 @@ export default function ContactsPage() {
       {/* Contacts List */}
       <div className="flex-1 overflow-y-auto custom-scrollbar p-6">
         {loading ? (
-          <div className="flex items-center justify-center h-64">
-            <div className="text-theme-muted font-medium">Loading contacts...</div>
-          </div>
+          <SkeletonLoader variant="contact" count={6} />
+        ) : error ? (
+          <ErrorState
+            message={error}
+            onRetry={() => loadContacts(searchQuery, selectedTag || undefined)}
+            className="h-full"
+          />
         ) : contacts.length === 0 ? (
-          <div className="flex flex-col items-center justify-center h-64">
-            <div className="text-4xl mb-4">👥</div>
-            <div className="text-theme-muted font-medium text-lg">
-              {searchQuery ? 'No contacts found' : 'No contacts yet'}
-            </div>
-            {searchQuery && (
-              <button
-                onClick={() => setSearchQuery('')}
-                className="mt-4 text-sm text-[var(--primary)] hover:underline"
-              >
-                Clear search
-              </button>
-            )}
-          </div>
+          <EmptyState
+            icon="👥"
+            title={searchQuery ? 'No contacts found' : 'No contacts yet'}
+            description={searchQuery ? 'Try adjusting your search or filters.' : 'Contacts will appear here as you receive messages.'}
+            action={searchQuery ? {
+              label: 'Clear search',
+              onClick: () => setSearchQuery(''),
+            } : undefined}
+            className="h-full"
+          />
         ) : (
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 max-w-7xl mx-auto">
             {contacts.map((contact, index) => (
