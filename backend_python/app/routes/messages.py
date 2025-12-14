@@ -1,10 +1,12 @@
-"""Message routes."""
+"""Message routes with thread normalization and contact deduplication."""
 from fastapi import APIRouter, HTTPException, Query
 from typing import Optional, List, Dict, Any
 from app.db.connection import get_pool
 from app.clients.llm import generate_chat_completion, LLMMessage, LLMRequestOptions
 from app.clients.vectorstore import query_vectorstore
 from app.policy.policy_engine import check_policy
+from app.utils.deduplication import normalize_thread_id
+from app.core.logger import logger
 import uuid
 import os
 import json

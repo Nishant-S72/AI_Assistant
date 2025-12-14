@@ -1,4 +1,4 @@
-"""Contact routes."""
+"""Contact routes with deduplication support."""
 from fastapi import APIRouter, HTTPException, Query
 from typing import Optional, List, Dict, Any
 from app.db.connection import get_pool
@@ -6,6 +6,8 @@ from app.clients.llm import generate_chat_completion, LLMMessage, LLMRequestOpti
 from app.services.cache_manager import (
     get_contact_summary_cache, set_contact_summary_cache
 )
+from app.utils.deduplication import merge_contacts
+from app.core.logger import logger
 import json
 import os
 import uuid
@@ -59,8 +61,8 @@ async def list_contacts(
         async with pool.acquire() as conn:
             rows = await conn.fetch(query, *params)
 
-        # Parse JSONB tags
-        contacts = []
+        # Parse JSONB tags and deduplicate contacts
+        contacts_dict = {}  # Key by email for deduplication
         for row in rows:
             contact = dict(row)
             tags = contact.get("tags")
@@ -71,7 +73,24 @@ async def list_contacts(
                     contact["tags"] = []
             elif not isinstance(tags, list):
                 contact["tags"] = []
-            contacts.append(contact)
+            
+            # Deduplicate by email (same email → same contact)
+            email = contact.get("email", "").lower().strip()
+            if email:
+                if email in contacts_dict:
+                    # Merge with existing contact
+                    contacts_dict[email] = merge_contacts(contacts_dict[email], contact)
+                else:
+                    contacts_dict[email] = contact
+            else:
+                # No email, add as-is (use ID as key)
+                contacts_dict[contact.get("id", str(uuid.uuid4()))] = contact
+        
+        # Return deduplicated contacts as list
+        contacts = list(contacts_dict.values())
+        
+        # Sort by last_message_at DESC
+        contacts.sort(key=lambda x: x.get("last_message_at") or "", reverse=True)
 
         return contacts
     except Exception as error:

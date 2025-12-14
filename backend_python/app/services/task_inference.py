@@ -1,7 +1,9 @@
-"""Service to infer tasks from inbox messages."""
+"""Service to infer tasks from inbox messages with duplicate prevention."""
 from typing import List, Dict, Any, Optional
 from app.db.connection import get_pool
 from app.clients.llm import generate_chat_completion, LLMMessage, LLMRequestOptions
+from app.utils.deduplication import is_duplicate_task
+from app.core.logger import logger
 import os
 import json
 import uuid
@@ -68,11 +70,26 @@ async def infer_tasks_from_messages(contact_id: Optional[str] = None, limit: int
                     'created_at': row['created_at'].isoformat() if row['created_at'] else None,
                 })
             
+            # Get existing tasks for duplicate checking
+            existing_tasks_query = """
+                SELECT id, title, contact_id, thread_id, status
+                FROM tasks
+                WHERE status = 'pending'
+            """
+            existing_tasks_rows = await conn.fetch(existing_tasks_query)
+            existing_tasks = [dict(row) for row in existing_tasks_rows]
+            
             # Analyze each thread for actionable tasks
             inferred_tasks = []
             for thread_data in list(threads.values())[:50]:  # Limit to 50 threads
                 tasks = await _extract_tasks_from_thread(thread_data)
-                inferred_tasks.extend(tasks)
+                
+                # Filter out duplicates using deduplication utility
+                for task in tasks:
+                    if not is_duplicate_task(task, existing_tasks):
+                        inferred_tasks.append(task)
+                        # Add to existing_tasks to prevent duplicates within this batch
+                        existing_tasks.append(task)
             
             # Save inferred tasks to database
             saved_count = await _save_inferred_tasks(inferred_tasks, pool)
@@ -88,15 +105,28 @@ async def infer_tasks_from_messages(contact_id: Optional[str] = None, limit: int
 
 
 async def _extract_tasks_from_thread(thread_data: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """Extract tasks from a thread using LLM."""
+    """Extract tasks from a thread using LLM with improved accuracy."""
     try:
+        from app.llm.prompt_builder import build_prompt
+        
         # Build context from thread messages
         messages_text = "\n".join([
             f"{msg['sender']}: {msg['body']}"
             for msg in thread_data['messages']
         ])
         
-        prompt = f"""Analyze the following conversation thread and extract any actionable tasks that need to be completed.
+        # Use standardized prompt with few-shot examples
+        prompt = build_prompt(
+            "task_extraction_prompt",
+            variables={
+                "conversation_context": messages_text,
+                "contact_name": thread_data.get('contact_name', 'Unknown'),
+            }
+        )
+        
+        # Fallback to simple prompt if template doesn't exist
+        if not prompt or "{{" in prompt:
+            prompt = f"""Analyze the following conversation thread and extract any actionable tasks that need to be completed.
 
 Conversation:
 {messages_text}
@@ -139,19 +169,38 @@ JSON:"""
             print(f"[TaskInference] Failed to parse JSON: {content[:200]}")
             tasks = []
         
-        # Enrich tasks with thread context
+        # Enrich tasks with thread context and filter by confidence
         enriched_tasks = []
+        MIN_CONFIDENCE_THRESHOLD = 0.7  # Ignore low-confidence suggestions
+        
         for task in tasks:
-            if isinstance(task, dict) and task.get("title"):
-                enriched_tasks.append({
-                    "title": task["title"],
-                    "contact_id": thread_data["contact_id"],
-                    "thread_id": thread_data["thread_id"],
-                    "message_id": thread_data["messages"][0].get("id") if thread_data["messages"] else None,
-                    "due_at": task.get("due_at"),
-                    "status": "pending",
-                    "priority": task.get("priority", "medium"),
-                })
+            if not isinstance(task, dict):
+                continue
+            
+            # Check confidence threshold
+            confidence = task.get("confidence", 0.5)
+            if confidence < MIN_CONFIDENCE_THRESHOLD:
+                logger.info(
+                    f"Skipping low-confidence task: {task.get('title', 'Unknown')} (confidence: {confidence})",
+                    extra={"confidence": confidence, "extraction_reason": task.get("extraction_reason", "")}
+                )
+                continue
+            
+            title = task.get("title", "").strip()
+            if not title:
+                continue
+            
+            enriched_tasks.append({
+                "title": title,
+                "contact_id": thread_data["contact_id"],
+                "thread_id": thread_data["thread_id"],
+                "message_id": thread_data["messages"][0].get("id") if thread_data["messages"] else None,
+                "due_at": task.get("due_at"),
+                "status": "pending",
+                "priority": task.get("priority", "medium"),
+                "confidence": confidence,
+                "extraction_reason": task.get("extraction_reason", ""),
+            })
         
         return enriched_tasks
         
@@ -179,19 +228,40 @@ async def _save_inferred_tasks(tasks: List[Dict[str, Any]], pool) -> int:
             existing_columns = {row['column_name'] for row in columns_info}
             
             for task in tasks:
-                # Check if task already exists (by title and contact_id)
+                # Enhanced duplicate checking: title similarity + thread_id + contact_id
+                title = task.get("title", "").strip()
+                contact_id = task.get("contact_id")
+                thread_id = task.get("thread_id")
+                
+                # Check exact match first
                 existing = await conn.fetchrow(
                     """
                     SELECT id FROM tasks 
                     WHERE title = $1 AND contact_id = $2 AND status = 'pending'
                     LIMIT 1
                     """,
-                    task["title"],
-                    task["contact_id"],
+                    title,
+                    contact_id,
                 )
                 
                 if existing:
-                    continue  # Skip duplicates
+                    continue  # Skip exact duplicates
+                
+                # Check by thread_id if available (same thread shouldn't have duplicate tasks)
+                if thread_id:
+                    existing_by_thread = await conn.fetchrow(
+                        """
+                        SELECT id FROM tasks 
+                        WHERE thread_id = $1 AND contact_id = $2 AND status = 'pending'
+                        AND LOWER(title) LIKE LOWER($3 || '%')
+                        LIMIT 1
+                        """,
+                        thread_id,
+                        contact_id,
+                        title[:20] if len(title) > 20 else title,  # First 20 chars for similarity
+                    )
+                    if existing_by_thread:
+                        continue  # Skip similar tasks in same thread
                 
                 # Insert new task
                 if 'thread_id' in existing_columns and 'message_id' in existing_columns:

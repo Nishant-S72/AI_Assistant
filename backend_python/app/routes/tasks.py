@@ -3,8 +3,9 @@ from fastapi import APIRouter, HTTPException, Query, Body, BackgroundTasks
 from typing import Optional, List, Dict, Any
 from pydantic import BaseModel
 from app.db.connection import get_pool
-from app.lib.priority import compute_priority
+from app.lib.priority import compute_priority, compute_priority_with_reason
 from app.services.task_inference import infer_tasks_from_messages
+from app.core.logger import logger
 import json
 import uuid
 
@@ -106,7 +107,7 @@ async def list_tasks(
             elif not isinstance(contact_tags, list):
                 contact_tags = []
 
-            priority = compute_priority(
+            priority, reason = compute_priority_with_reason(
                 {
                     "task": {
                         "due_at": task.get("due_at"),
@@ -124,6 +125,7 @@ async def list_tasks(
             )
 
             task["priority"] = priority
+            task["priority_reason"] = reason  # Add reason field for UI display
             tasks.append(task)
 
         return tasks
