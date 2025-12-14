@@ -87,6 +87,7 @@ async def run_llm(
         )
         
         latency_ms = int((time.time() - start_time) * 1000)
+        tokens_used = getattr(response, 'usage', {}).get('total_tokens', 0) if hasattr(response, 'usage') else 0
         
         logger.info(
             f"LLM call completed: {task}",
@@ -94,6 +95,7 @@ async def run_llm(
                 "task": task,
                 "model": selected_model,
                 "latency_ms": latency_ms,
+                "tokens_used": tokens_used,
                 "correlation_id": correlation_id,
             }
         )
@@ -102,12 +104,15 @@ async def run_llm(
         
     except Exception as e:
         latency_ms = int((time.time() - start_time) * 1000)
+        error_type = type(e).__name__
+        
         logger.error(
             f"LLM call failed: {task}",
             extra={
                 "task": task,
                 "model": selected_model,
                 "error": str(e),
+                "error_type": error_type,
                 "latency_ms": latency_ms,
                 "correlation_id": correlation_id,
             }
@@ -115,7 +120,12 @@ async def run_llm(
         raise LLMError(
             message=f"LLM call failed for task {task}: {str(e)}",
             model=selected_model,
-            details={"task": task, "latency_ms": latency_ms}
+            details={
+                "task": task,
+                "latency_ms": latency_ms,
+                "error_type": error_type,
+                "failure_reason": str(e)
+            }
         )
 
 
@@ -124,49 +134,82 @@ async def classify_intent(
     correlation_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
-    Classify user intent using LLM.
+    Classify user intent using LLM with standardized prompt.
     
     Returns:
-        {"intent": "general"|"rag"|"action_candidate", "confidence": float}
+        {
+            "intent": "general"|"rag"|"action_candidate",
+            "confidence": float,
+            "fallback_explanation": str
+        }
     """
     try:
-        prompt_text = load_prompt("intent_prompt")
-        system_prompt = prompt_text + f"\n\nUser message: {user_message}\n\nRespond with ONLY the label."
+        from app.llm.prompt_builder import build_prompt
+        
+        # Build standardized prompt
+        prompt = build_prompt(
+            "intent_prompt",
+            variables={"task": user_message}
+        )
         
         response = await run_llm(
             task="intent_classification",
             prompt=user_message,
-            system_prompt=prompt_text,
+            system_prompt=prompt,
             temperature=0.0,
-            max_tokens=50,
+            max_tokens=200,  # Increased for JSON response
             correlation_id=correlation_id,
         )
         
-        # Parse response - should be just the label
-        intent_label = response.strip().lower()
+        # Try to parse as JSON first
+        try:
+            # Remove markdown code blocks if present
+            json_text = response.strip()
+            json_text = re.sub(r"```json\s*", "", json_text)
+            json_text = re.sub(r"```\s*", "", json_text)
+            
+            # Extract JSON object
+            json_match = re.search(r"\{[\s\S]*\}", json_text)
+            if json_match:
+                result = json.loads(json_match.group(0))
+                intent_label = result.get("intent", "general").lower()
+                confidence = float(result.get("confidence", 0.7))
+                fallback_explanation = result.get("fallback_explanation", "")
+            else:
+                raise ValueError("No JSON found in response")
+        except (json.JSONDecodeError, ValueError):
+            # Fallback: parse as plain text
+            intent_label = response.strip().lower()
+            
+            # Validate intent
+            valid_intents = ["general", "rag", "action_candidate"]
+            if intent_label not in valid_intents:
+                # Try to extract from response
+                for valid in valid_intents:
+                    if valid in intent_label:
+                        intent_label = valid
+                        break
+                else:
+                    intent_label = "general"  # Default fallback
+            
+            # Calculate confidence (simplified)
+            confidence = 0.9 if intent_label in response.lower() else 0.7
+            fallback_explanation = f"Parsed from text response: {response[:100]}"
         
         # Validate intent
         valid_intents = ["general", "rag", "action_candidate"]
         if intent_label not in valid_intents:
-            # Fallback: try to extract from response
-            for valid in valid_intents:
-                if valid in intent_label:
-                    intent_label = valid
-                    break
-            else:
-                intent_label = "general"  # Default fallback
-        
-        # Calculate confidence (simplified - in production, use model's confidence if available)
-        confidence = 0.9 if intent_label in response.lower() else 0.7
-        
-        # Apply threshold
-        if confidence < 0.65:
             intent_label = "general"
-            confidence = 0.65
+            confidence = 0.5
+            fallback_explanation = "Invalid intent label, defaulting to 'general'"
+        
+        # Ensure confidence is in valid range
+        confidence = max(0.0, min(1.0, confidence))
         
         result = {
             "intent": intent_label,
             "confidence": confidence,
+            "fallback_explanation": fallback_explanation,
         }
         
         logger.info(
@@ -174,6 +217,7 @@ async def classify_intent(
             extra={
                 "intent": intent_label,
                 "confidence": confidence,
+                "fallback_explanation": fallback_explanation,
                 "correlation_id": correlation_id,
             }
         )
@@ -183,5 +227,9 @@ async def classify_intent(
     except Exception as e:
         logger.error(f"Intent classification failed: {e}", extra={"correlation_id": correlation_id})
         # Fallback to general
-        return {"intent": "general", "confidence": 0.5}
+        return {
+            "intent": "general",
+            "confidence": 0.5,
+            "fallback_explanation": f"Error during classification: {str(e)}. Defaulting to 'general'.",
+        }
 
